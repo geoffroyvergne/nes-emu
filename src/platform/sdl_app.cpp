@@ -27,7 +27,10 @@ void SdlApp::init(const std::string& title, int width, int height, int scale) {
         throw std::runtime_error(std::string("SDL_CreateWindow failed: ") + SDL_GetError());
     }
 
-    renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    // No SDL_RENDERER_PRESENTVSYNC: frame pacing (including speed adjustment)
+    // is handled explicitly in main.cpp's loop instead, since vsync would
+    // lock playback to the display's refresh rate and defeat speed changes.
+    renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_ACCELERATED);
     if (!renderer_) {
         throw std::runtime_error(std::string("SDL_CreateRenderer failed: ") + SDL_GetError());
     }
@@ -44,16 +47,39 @@ const uint8_t* SdlApp::keyboardState() const {
 }
 
 bool SdlApp::pollEvents() {
+    keyPressedEdge_.fill(false);
+
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         if (event.type == SDL_QUIT) {
             return false;
         }
-        if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
-            return false;
+        if (event.type == SDL_KEYDOWN) {
+            if (event.key.keysym.sym == SDLK_ESCAPE) {
+                return false;
+            }
+            if (!event.key.repeat && event.key.keysym.scancode < keyPressedEdge_.size()) {
+                keyPressedEdge_[event.key.keysym.scancode] = true;
+            }
+            keyHeld_[event.key.keysym.sym] = true;
+        } else if (event.type == SDL_KEYUP) {
+            keyHeld_[event.key.keysym.sym] = false;
         }
     }
     return true;
+}
+
+bool SdlApp::keyHeld(int32_t keycode) const {
+    auto it = keyHeld_.find(keycode);
+    return it != keyHeld_.end() && it->second;
+}
+
+bool SdlApp::keyPressed(int scancode) const {
+    return scancode >= 0 && static_cast<size_t>(scancode) < keyPressedEdge_.size() && keyPressedEdge_[scancode];
+}
+
+void SdlApp::setTitle(const std::string& title) {
+    SDL_SetWindowTitle(window_, title.c_str());
 }
 
 void SdlApp::beginFrame(uint8_t r, uint8_t g, uint8_t b) {

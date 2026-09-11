@@ -4,16 +4,61 @@ A Nintendo Entertainment System emulator in C++20 / CMake.
 
 ## Status
 
-Milestones 1-6 of the project plan: project scaffold, iNES ROM loading with
-an extensible `Mapper` interface (NROM/mapper 0 implemented), a full 6502 CPU
-core, and a full PPU (background + sprite rendering, scrolling, OAM DMA,
-NMI/vblank timing) driven by a cycle-accurate system clock in `Bus::clock()`.
-Keyboard input is wired to controller 1. The result: NROM games render and
-are playable, silently - no APU/audio yet, and only mapper 0 ROMs load so
-far (more mappers are the next milestone).
+NROM games render and are playable, silently - no APU/audio yet, and only
+mapper 0 ROMs load so far (more mappers are the next milestone).
 
-Controls: arrow keys = D-pad, X = A, Z = B, Enter = Start, Right Shift =
-Select.
+## Features
+
+- Full MOS 6502 CPU core: all official opcodes, correct addressing-mode
+  cycle timing (including page-cross and branch-taken extra cycles), stack,
+  interrupts, and the indirect-JMP page-boundary hardware bug.
+- Full 2C02 PPU: background + sprite rendering, scrolling, sprite-0 hit and
+  overflow, OAM DMA, NMI/vblank timing.
+- Cycle-accurate system clock (`Bus::clock()`) driving CPU and PPU at their
+  real 1:3 ratio.
+- iNES ROM loading behind an extensible `Mapper` interface (NROM/mapper 0
+  implemented so far).
+- Keyboard input wired to controller 1 (see Controls below).
+- SDL2 frontend: windowed rendering of the PPU framebuffer, paced to the
+  NES's real ~60.0988 Hz frame rate with an adjustable speed multiplier
+  (0.25x-4x) instead of relying on vsync.
+
+## Milestones
+
+- [x] 1. Project scaffold (CMake + SDL2 window)
+- [x] 2. iNES ROM loading + `Mapper` interface + NROM (mapper 0)
+- [x] 3. 6502 CPU core
+- [x] 4. CPU validation (self-contained unit tests + optional `nestest` golden-log check)
+- [x] 5. PPU core (background + sprite rendering, NMI timing)
+- [x] 6. Playable silent loop (SDL framebuffer rendering + keyboard input)
+- [ ] 7. More mappers (MMC1, UxROM, CNROM, MMC3)
+- [ ] 8. APU (audio): 2 pulse channels, triangle, noise, DMC
+- [ ] 9. Joystick/gamepad support (`SDL_GameController`)
+- [ ] 10. Polish: save states, pause/reset/fullscreen, config file, FPS counter/vsync toggle
+
+## Controls
+
+| NES button | Key         |
+|------------|-------------|
+| D-pad      | Arrow keys  |
+| A          | X           |
+| B          | Z           |
+| Start      | Enter       |
+| Select     | Right Shift |
+
+A/B are matched by the printed letter (keycode), not physical key position,
+so they work correctly on non-QWERTY layouts too (e.g. on AZERTY, pressing
+the key labeled "Z" triggers B, even though that's a different physical key
+than on QWERTY).
+
+| Action              | Key           |
+|---------------------|---------------|
+| Speed up (+25%)      | `=` / Numpad `+` |
+| Slow down (-25%)     | `-` / Numpad `-` |
+| Reset speed to 100%  | `0` / Numpad `0` |
+
+Speed ranges from 25% to 400%; the current value is shown in the window
+title. Gamepad/joystick support is milestone 9 (not implemented yet).
 
 ## Prerequisites (macOS)
 
@@ -35,8 +80,7 @@ cmake --build build -j
 ```
 
 With no ROM argument, it just opens an empty window (useful for confirming
-SDL2 is wired up correctly). Only mapper 0 (NROM) ROMs load successfully so
-far; more mappers land in a later milestone.
+SDL2 is wired up correctly).
 
 ## Test
 
@@ -61,9 +105,3 @@ third-party tool. It's skipped (reported as passing) when absent.
   frontend.
 - `src/platform/` - the SDL2 frontend (window, texture presentation, input).
 - `tests/` - CTest-registered test executables.
-
-## Roadmap
-
-See the project plan for the full milestone list: more mappers (MMC1, UxROM,
-CNROM, MMC3), APU audio, then joystick/gamepad support and polish
-(save states, config, etc).
