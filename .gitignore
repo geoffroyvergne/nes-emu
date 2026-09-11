@@ -1,0 +1,11 @@
+build/
+build-*/
+.cache/
+compile_commands.json
+*.o
+*.obj
+.DS_Store
+
+# ROM files are never committed (copyrighted game data / third-party test tools).
+*.nes
+tests/roms/*.log
