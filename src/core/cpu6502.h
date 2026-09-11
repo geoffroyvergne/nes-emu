@@ -7,6 +7,9 @@
 
 namespace nes {
 
+class StateWriter;
+class StateReader;
+
 // A cycle-accurate (in total cycle count, not per-cycle internal state)
 // emulation of the MOS 6502 core used by the NES (the NES's 2A03 omits BCD
 // mode but we don't implement BCD math anyway since ADC/SBC are only ever
@@ -68,6 +71,11 @@ public:
     void setPC(uint16_t pc) { pc_ = pc; }
 
     bool getFlag(Flag f) const { return (status_ & f) != 0; }
+
+    // Save-state support: registers and in-flight instruction state. The
+    // opcode lookup table isn't included (rebuilt by the constructor).
+    void saveState(StateWriter& w) const;
+    void loadState(StateReader& r);
 
 private:
     void setFlag(Flag f, bool value);

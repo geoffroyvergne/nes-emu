@@ -4,12 +4,11 @@
 
 namespace nes {
 
-// Mapper 000 (NROM): the simplest cartridge type, no bank switching.
-// 16KB or 32KB fixed PRG ROM (16KB is mirrored across $8000-$FFFF),
-// 8KB fixed CHR ROM (or CHR RAM if prgChrRamFallback requests it).
-class MapperNrom final : public Mapper {
+// Mapper 003 (CNROM): PRG ROM is fixed (16KB mirrored or 32KB, like NROM).
+// CHR ROM is switched 8KB at a time via any write to $8000-$FFFF.
+class MapperCnrom final : public Mapper {
 public:
-    MapperNrom(uint8_t prgBanks16k, uint8_t chrBanks8k, Mirroring mirroring);
+    MapperCnrom(uint8_t prgBanks16k, uint8_t chrBanks8k, Mirroring mirroring);
 
     bool cpuMapRead(uint16_t addr, uint32_t& mappedAddr) override;
     bool cpuMapWrite(uint16_t addr, uint32_t& mappedAddr, uint8_t data) override;
@@ -17,14 +16,14 @@ public:
     bool ppuMapWrite(uint16_t addr, uint32_t& mappedAddr) override;
     Mirroring mirroring() const override { return mirroring_; }
 
-    // NROM has no bank-switch registers or other mutable state to save.
-    void saveState(StateWriter&) const override {}
-    void loadState(StateReader&) override {}
+    void saveState(StateWriter& w) const override;
+    void loadState(StateReader& r) override;
 
 private:
     uint8_t prgBanks16k_;
     uint8_t chrBanks8k_;
     Mirroring mirroring_;
+    uint8_t chrBank_ = 0;
 };
 
 } // namespace nes

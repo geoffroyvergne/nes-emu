@@ -4,6 +4,9 @@
 
 namespace nes {
 
+class StateWriter;
+class StateReader;
+
 // Mirroring mode the cartridge/mapper reports for nametable mirroring.
 // Used by the PPU (added in a later milestone) to decide how the two
 // physical 1KB nametables map to the four logical nametable slots.
@@ -41,6 +44,24 @@ public:
     virtual Mirroring mirroring() const = 0;
 
     virtual void reset() {}
+
+    // Called once per visible/pre-render scanline (while rendering is
+    // enabled) so mappers with a scanline-based IRQ counter (MMC3) can clock
+    // it. A no-op for mappers without one.
+    virtual void scanlineTick() {}
+
+    // True if this mapper currently wants to assert the CPU's IRQ line
+    // (e.g. MMC3's scanline counter hit zero). The mapper is responsible for
+    // clearing this itself once the game acknowledges the interrupt in
+    // whatever mapper-specific way real hardware defines.
+    virtual bool irqPending() const { return false; }
+
+    // Save-state support: writes/reads this mapper's bank-switching and
+    // (where applicable) IRQ-counter state, in the same fixed order every
+    // time. Does not include PRG/CHR ROM contents (immutable) or PRG RAM
+    // (owned and saved by Cartridge itself).
+    virtual void saveState(StateWriter& w) const = 0;
+    virtual void loadState(StateReader& r) = 0;
 };
 
 } // namespace nes

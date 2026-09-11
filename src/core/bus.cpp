@@ -1,9 +1,17 @@
 #include "core/bus.h"
 
+#include "core/apu2A03.h"
 #include "core/cpu6502.h"
 #include "core/ppu2C02.h"
+#include "core/state_io.h"
 
 namespace nes {
+
+namespace {
+bool isApuRegister(uint16_t addr) {
+    return (addr >= 0x4000 && addr <= 0x4013) || addr == 0x4015 || addr == 0x4017;
+}
+} // namespace
 
 uint8_t Bus::read(uint16_t addr) {
     if (addr <= 0x1FFF) {
@@ -12,10 +20,14 @@ uint8_t Bus::read(uint16_t addr) {
     if (addr <= 0x3FFF) {
         return ppu_ ? ppu_->cpuRead(addr) : 0;
     }
+    if (addr == 0x4015) {
+        return apu_ ? apu_->cpuRead(addr) : 0;
+    }
     if (addr == 0x4016) {
         return controllers_[0].read();
     }
     if (addr == 0x4017) {
+        // $4017 is write-only for the APU frame counter; reads go to controller 2.
         return controllers_[1].read();
     }
     if (addr >= 0x4020 && cartridge_) {
@@ -24,7 +36,7 @@ uint8_t Bus::read(uint16_t addr) {
             return value;
         }
     }
-    return 0; // Open bus (APU registers not yet implemented, unmapped space).
+    return 0; // Open bus.
 }
 
 void Bus::write(uint16_t addr, uint8_t value) {
@@ -48,16 +60,32 @@ void Bus::write(uint16_t addr, uint8_t value) {
         controllers_[1].write(value);
         return;
     }
+    if (isApuRegister(addr)) {
+        if (apu_) apu_->cpuWrite(addr, value);
+        return;
+    }
     if (addr >= 0x4020 && cartridge_) {
         cartridge_->cpuWrite(addr, value);
     }
-    // $4000-$4013, $4015, $4017 (APU registers) are not implemented yet: ignored.
+}
+
+void Bus::setRegion(bool isPal) {
+    if (isPal) {
+        ppuTicksPerCpuTick_ = 5;
+        ppuTicksDenominator_ = 16;
+    } else {
+        ppuTicksPerCpuTick_ = 1;
+        ppuTicksDenominator_ = 3;
+    }
+    cpuTickAccumulator_ = 0;
 }
 
 void Bus::reset() {
     if (cpu_) cpu_->reset();
     if (ppu_) ppu_->reset();
-    systemClockCounter_ = 0;
+    if (apu_) apu_->reset();
+    cpuTickAccumulator_ = 0;
+    cpuCycleCount_ = 0;
     dmaTransfer_ = false;
     dmaDummyCycle_ = true;
     dmaPage_ = 0;
@@ -68,12 +96,18 @@ void Bus::reset() {
 void Bus::clock() {
     if (ppu_) ppu_->clock();
 
-    if (systemClockCounter_ % 3 == 0) {
-        uint64_t cpuCycle = systemClockCounter_ / 3;
+    cpuTickAccumulator_ += ppuTicksPerCpuTick_;
+    if (cpuTickAccumulator_ >= ppuTicksDenominator_) {
+        cpuTickAccumulator_ -= ppuTicksDenominator_;
+
+        // The APU shares the CPU's clock and, unlike the CPU, keeps running
+        // during OAM DMA stalls on real hardware.
+        if (apu_) apu_->clock();
+
         if (dmaTransfer_) {
             if (dmaDummyCycle_) {
-                if (cpuCycle % 2 == 1) dmaDummyCycle_ = false;
-            } else if (cpuCycle % 2 == 0) {
+                if (cpuCycleCount_ % 2 == 1) dmaDummyCycle_ = false;
+            } else if (cpuCycleCount_ % 2 == 0) {
                 dmaData_ = read(static_cast<uint16_t>((dmaPage_ << 8) | dmaAddr_));
             } else {
                 if (ppu_) ppu_->oamWrite(dmaAddr_, dmaData_);
@@ -86,6 +120,7 @@ void Bus::clock() {
         } else if (cpu_) {
             cpu_->clock();
         }
+        cpuCycleCount_++;
     }
 
     if (ppu_ && ppu_->nmiRequested()) {
@@ -93,7 +128,37 @@ void Bus::clock() {
         if (cpu_) cpu_->nmi();
     }
 
-    systemClockCounter_++;
+    // Mapper-driven IRQ (e.g. MMC3's scanline counter) and/or APU IRQ (frame
+    // counter, DMC). Level-triggered: each source clears its own pending
+    // flag once acknowledged in whatever way real hardware defines for it
+    // (MMC3: write $E000; APU: read $4015 for the frame IRQ, $4015/$4010
+    // writes for the DMC IRQ), so no separate clear step is needed here.
+    bool irq = (cartridge_ && cartridge_->irqPending()) || (apu_ && apu_->irqPending());
+    if (irq && cpu_) {
+        cpu_->irq();
+    }
+}
+
+void Bus::saveState(StateWriter& w) const {
+    w.writeArray(ram_);
+    w.write(cpuTickAccumulator_);
+    w.write(cpuCycleCount_);
+    w.write(dmaTransfer_);
+    w.write(dmaDummyCycle_);
+    w.write(dmaPage_);
+    w.write(dmaAddr_);
+    w.write(dmaData_);
+}
+
+void Bus::loadState(StateReader& r) {
+    r.readArray(ram_);
+    cpuTickAccumulator_ = r.read<uint32_t>();
+    cpuCycleCount_ = r.read<uint64_t>();
+    dmaTransfer_ = r.read<bool>();
+    dmaDummyCycle_ = r.read<bool>();
+    dmaPage_ = r.read<uint8_t>();
+    dmaAddr_ = r.read<uint8_t>();
+    dmaData_ = r.read<uint8_t>();
 }
 
 } // namespace nes

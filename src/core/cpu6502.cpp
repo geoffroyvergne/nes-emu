@@ -1,10 +1,42 @@
 #include "core/cpu6502.h"
 
+#include "core/state_io.h"
+
 namespace nes {
 
 Cpu6502::Cpu6502(Bus& bus) : bus_(bus) {
     buildLookupTable();
     reset();
+}
+
+void Cpu6502::saveState(StateWriter& w) const {
+    w.write(a_);
+    w.write(x_);
+    w.write(y_);
+    w.write(sp_);
+    w.write(pc_);
+    w.write(status_);
+    w.write(fetched_);
+    w.write(addrAbs_);
+    w.write(addrRel_);
+    w.write(opcode_);
+    w.write(cyclesLeft_);
+    w.write(clockCount_);
+}
+
+void Cpu6502::loadState(StateReader& r) {
+    a_ = r.read<uint8_t>();
+    x_ = r.read<uint8_t>();
+    y_ = r.read<uint8_t>();
+    sp_ = r.read<uint8_t>();
+    pc_ = r.read<uint16_t>();
+    status_ = r.read<uint8_t>();
+    fetched_ = r.read<uint8_t>();
+    addrAbs_ = r.read<uint16_t>();
+    addrRel_ = r.read<uint16_t>();
+    opcode_ = r.read<uint8_t>();
+    cyclesLeft_ = r.read<uint8_t>();
+    clockCount_ = r.read<uint64_t>();
 }
 
 void Cpu6502::setFlag(Flag f, bool value) {

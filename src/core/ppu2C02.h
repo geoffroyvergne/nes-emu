@@ -7,10 +7,14 @@
 
 namespace nes {
 
+class StateWriter;
+class StateReader;
+
 // The NES's 2C02 picture processing unit: background + sprite rendering,
-// scrolling, and vblank/NMI timing. Runs at 3x the CPU clock rate; the
-// owning Bus is responsible for calling clock() 3 times per CPU cycle and
-// for delivering an NMI to the CPU when nmiRequested() is true.
+// scrolling, and vblank/NMI timing. Runs at the CPU clock rate times the
+// region's PPU:CPU ratio (NTSC: 3x; PAL: 3.2x); the owning Bus is
+// responsible for calling clock() at that rate and for delivering an NMI to
+// the CPU when nmiRequested() is true.
 //
 // Address-space and timing details (loopy scroll registers, the background
 // shift-register pipeline, sprite evaluation, sprite-0 hit) follow the
@@ -21,6 +25,11 @@ public:
 
     void connectCartridge(Cartridge* cartridge) { cartridge_ = cartridge; }
     void reset();
+
+    // Configures NTSC (262 scanlines/frame, odd-frame cycle skip - the
+    // default) or PAL (312 scanlines/frame, no odd-frame skip) timing. Call
+    // before reset()/clock().
+    void setRegion(bool isPal);
 
     // Advances exactly one PPU cycle (1/3 of a CPU cycle).
     void clock();
@@ -40,6 +49,14 @@ public:
 
     // 256x240 framebuffer, one packed 0x00RRGGBB value per pixel, row-major.
     const std::array<uint32_t, 256 * 240>& frameBuffer() const { return frame_; }
+
+    // Save-state support: all mutable rendering/register state. Does NOT
+    // include the region config set by setRegion() (scanlinesPerFrame_,
+    // oddFrameSkipEnabled_) - that's setup, not runtime state, and is
+    // expected to already be set correctly (same ROM/session) before a
+    // loadState() call.
+    void saveState(StateWriter& w) const;
+    void loadState(StateReader& r);
 
 private:
     uint8_t ppuRead(uint16_t addr);
@@ -95,6 +112,8 @@ private:
     int32_t scanline_ = -1;
     int32_t cycle_ = 0;
     bool oddFrame_ = false;
+    int32_t scanlinesPerFrame_ = 262;
+    bool oddFrameSkipEnabled_ = true;
 
     uint8_t bgNextTileId_ = 0;
     uint8_t bgNextTileAttrib_ = 0;

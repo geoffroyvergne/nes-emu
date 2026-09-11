@@ -20,8 +20,13 @@ add_library(nes_core STATIC
     src/core/bus.cpp
     src/core/cpu6502.cpp
     src/core/ppu2C02.cpp
+    src/core/apu2A03.cpp
     src/core/cartridge.cpp
     src/core/mappers/mapper_nrom.cpp
+    src/core/mappers/mapper_mmc1.cpp
+    src/core/mappers/mapper_uxrom.cpp
+    src/core/mappers/mapper_cnrom.cpp
+    src/core/mappers/mapper_mmc3.cpp
 )
 target_include_directories(nes_core PUBLIC src)
 

@@ -3,7 +3,12 @@
 #include <fstream>
 #include <stdexcept>
 
+#include "core/mappers/mapper_cnrom.h"
+#include "core/mappers/mapper_mmc1.h"
+#include "core/mappers/mapper_mmc3.h"
 #include "core/mappers/mapper_nrom.h"
+#include "core/mappers/mapper_uxrom.h"
+#include "core/state_io.h"
 
 namespace nes {
 
@@ -38,6 +43,7 @@ Cartridge::Cartridge(const std::string& path) {
     }
 
     mapperId_ = static_cast<uint8_t>((flags7 & 0xF0) | (flags6 >> 4));
+    tvSystem_ = (header[9] & 0x01) ? TvSystem::PAL : TvSystem::NTSC;
 
     Mirroring mirroring;
     if (flags6 & 0x08) {
@@ -72,9 +78,21 @@ Cartridge::Cartridge(const std::string& path) {
         case 0:
             mapper_ = std::make_unique<MapperNrom>(prgBanks16k_, chrBanks8k_, mirroring);
             break;
+        case 1:
+            mapper_ = std::make_unique<MapperMmc1>(prgBanks16k_, chrBanks8k_, mirroring);
+            break;
+        case 2:
+            mapper_ = std::make_unique<MapperUxrom>(prgBanks16k_, chrBanks8k_, mirroring);
+            break;
+        case 3:
+            mapper_ = std::make_unique<MapperCnrom>(prgBanks16k_, chrBanks8k_, mirroring);
+            break;
+        case 4:
+            mapper_ = std::make_unique<MapperMmc3>(prgBanks16k_, chrBanks8k_, mirroring);
+            break;
         default:
             throw std::runtime_error("Cartridge: unsupported mapper " + std::to_string(mapperId_) +
-                                      " (only NROM/0 is implemented so far): " + path);
+                                      " (supported: 0 NROM, 1 MMC1, 2 UxROM, 3 CNROM, 4 MMC3): " + path);
     }
 }
 
@@ -125,6 +143,22 @@ bool Cartridge::ppuWrite(uint16_t addr, uint8_t value) {
         return true;
     }
     return false;
+}
+
+void Cartridge::saveState(StateWriter& w) const {
+    w.writeBytes(prgRam_.data(), prgRam_.size());
+    if (chrBanks8k_ == 0) { // CHR RAM: mutable, worth saving. CHR ROM never changes.
+        w.writeBytes(chrMem_.data(), chrMem_.size());
+    }
+    mapper_->saveState(w);
+}
+
+void Cartridge::loadState(StateReader& r) {
+    r.readBytes(prgRam_.data(), prgRam_.size());
+    if (chrBanks8k_ == 0) {
+        r.readBytes(chrMem_.data(), chrMem_.size());
+    }
+    mapper_->loadState(r);
 }
 
 } // namespace nes

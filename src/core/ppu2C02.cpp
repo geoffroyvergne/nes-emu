@@ -1,5 +1,7 @@
 #include "core/ppu2C02.h"
 
+#include "core/state_io.h"
+
 namespace nes {
 
 // Standard NES/2C02 NTSC palette, 64 entries, packed as 0x00RRGGBB.
@@ -15,6 +17,11 @@ const std::array<uint32_t, 64> Ppu2C02::kPalette = {{
 }};
 
 Ppu2C02::Ppu2C02() { frame_.fill(0); }
+
+void Ppu2C02::setRegion(bool isPal) {
+    scanlinesPerFrame_ = isPal ? 312 : 262;
+    oddFrameSkipEnabled_ = !isPal;
+}
 
 void Ppu2C02::reset() {
     control_ = 0;
@@ -248,8 +255,9 @@ void Ppu2C02::updateShifters() {
 
 void Ppu2C02::clock() {
     if (scanline_ >= -1 && scanline_ < 240) {
-        if (scanline_ == 0 && cycle_ == 0 && oddFrame_ && (mask_ & (kMaskRenderBg | kMaskRenderSprites))) {
-            cycle_ = 1; // Odd-frame cycle skip.
+        if (scanline_ == 0 && cycle_ == 0 && oddFrame_ && oddFrameSkipEnabled_ &&
+            (mask_ & (kMaskRenderBg | kMaskRenderSprites))) {
+            cycle_ = 1; // Odd-frame cycle skip (NTSC only - PAL's PPU:CPU ratio doesn't need it).
         }
 
         if (scanline_ == -1 && cycle_ == 1) {
@@ -306,6 +314,12 @@ void Ppu2C02::clock() {
         }
         if (scanline_ == -1 && cycle_ >= 280 && cycle_ < 305) {
             transferAddressY();
+        }
+
+        // Approximates the real PPU A12-rising-edge signal MMC3-style
+        // mappers clock their scanline IRQ counter from (see mapper_mmc3.h).
+        if (cycle_ == 260 && (mask_ & (kMaskRenderBg | kMaskRenderSprites)) && cartridge_) {
+            cartridge_->scanlineTick();
         }
 
         // Sprite evaluation for the NEXT scanline.
@@ -445,12 +459,82 @@ void Ppu2C02::clock() {
     if (cycle_ >= 341) {
         cycle_ = 0;
         scanline_++;
-        if (scanline_ >= 261) {
+        if (scanline_ >= scanlinesPerFrame_ - 1) {
             scanline_ = -1;
             frameComplete_ = true;
             oddFrame_ = !oddFrame_;
         }
     }
+}
+
+void Ppu2C02::saveState(StateWriter& w) const {
+    w.writeArray(nameTable_);
+    w.writeArray(paletteTable_);
+    w.writeArray(oam_);
+    w.write(control_);
+    w.write(mask_);
+    w.write(status_);
+    w.write(oamAddr_);
+    w.write(vramAddr_);
+    w.write(tramAddr_);
+    w.write(fineX_);
+    w.write(addressLatch_);
+    w.write(dataBuffer_);
+    w.write(scanline_);
+    w.write(cycle_);
+    w.write(oddFrame_);
+    w.write(bgNextTileId_);
+    w.write(bgNextTileAttrib_);
+    w.write(bgNextTileLsb_);
+    w.write(bgNextTileMsb_);
+    w.write(bgShifterPatternLo_);
+    w.write(bgShifterPatternHi_);
+    w.write(bgShifterAttribLo_);
+    w.write(bgShifterAttribHi_);
+    w.writeArray(spritesOnScanline_);
+    w.write(spriteCount_);
+    w.writeArray(spriteShifterPatternLo_);
+    w.writeArray(spriteShifterPatternHi_);
+    w.write(spriteZeroHitPossible_);
+    w.write(spriteZeroBeingRendered_);
+    w.write(frameComplete_);
+    w.write(nmiRequested_);
+    w.writeArray(frame_);
+}
+
+void Ppu2C02::loadState(StateReader& r) {
+    r.readArray(nameTable_);
+    r.readArray(paletteTable_);
+    r.readArray(oam_);
+    control_ = r.read<uint8_t>();
+    mask_ = r.read<uint8_t>();
+    status_ = r.read<uint8_t>();
+    oamAddr_ = r.read<uint8_t>();
+    vramAddr_ = r.read<uint16_t>();
+    tramAddr_ = r.read<uint16_t>();
+    fineX_ = r.read<uint8_t>();
+    addressLatch_ = r.read<bool>();
+    dataBuffer_ = r.read<uint8_t>();
+    scanline_ = r.read<int32_t>();
+    cycle_ = r.read<int32_t>();
+    oddFrame_ = r.read<bool>();
+    bgNextTileId_ = r.read<uint8_t>();
+    bgNextTileAttrib_ = r.read<uint8_t>();
+    bgNextTileLsb_ = r.read<uint8_t>();
+    bgNextTileMsb_ = r.read<uint8_t>();
+    bgShifterPatternLo_ = r.read<uint16_t>();
+    bgShifterPatternHi_ = r.read<uint16_t>();
+    bgShifterAttribLo_ = r.read<uint16_t>();
+    bgShifterAttribHi_ = r.read<uint16_t>();
+    r.readArray(spritesOnScanline_);
+    spriteCount_ = r.read<uint8_t>();
+    r.readArray(spriteShifterPatternLo_);
+    r.readArray(spriteShifterPatternHi_);
+    spriteZeroHitPossible_ = r.read<bool>();
+    spriteZeroBeingRendered_ = r.read<bool>();
+    frameComplete_ = r.read<bool>();
+    nmiRequested_ = r.read<bool>();
+    r.readArray(frame_);
 }
 
 } // namespace nes
