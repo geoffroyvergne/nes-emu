@@ -68,6 +68,7 @@ private:
     void transferAddressY();
     void loadBackgroundShifters();
     void updateShifters();
+    uint16_t spritePatternAddressLo(uint8_t spriteIndex) const;
 
     Cartridge* cartridge_ = nullptr;
 

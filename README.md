@@ -17,6 +17,12 @@ the large majority of the licensed library - render and play with sound.
 - Full 2A03 APU: 2 pulse channels (with sweep), triangle, noise, and DMC,
   mixed through the standard NES non-linear mixer formula and streamed to
   the audio device at 44.1kHz.
+- Audio-glitch mitigations: a short startup mute window (covers a game's
+  init-routine transient blips) and proactive buffer-underrun avoidance
+  (re-prebuffers before the audio queue actually runs dry, including on
+  gamepad hot-connect, which can otherwise stall the audio thread) eliminate
+  the clicking/scratching that used to happen at boot and when a controller
+  connects.
 - Cycle-accurate system clock (`Bus::clock()`) driving CPU, PPU, and APU at
   their real relative rates.
 - NTSC and PAL timing: different CPU/PPU/APU clock rates, PPU:CPU ratio
@@ -35,6 +41,17 @@ the large majority of the licensed library - render and play with sound.
   changes rather than muting.
 - Save states (one slot, S/L), pause, soft reset, fullscreen toggle, and a
   live FPS counter (see Controls below).
+
+## Known issues
+
+- Some mapper 4 (MMC3) games that use the scanline IRQ counter for
+  split-scroll effects (e.g. Super Mario Bros. 3's status bar) can show a
+  vertical rendering artifact near the screen edges while scrolling. The
+  MMC3 IRQ counter currently clocks off a fixed per-scanline tick rather
+  than the real chip's PPU-address-bus (A12) edge detection, which is
+  usually close enough but not exact for every game's timing. Under
+  investigation - root-causing this precisely (rather than papering over the
+  symptom) needs a real copy of the affected ROM, which isn't bundled here.
 
 ## Milestones
 

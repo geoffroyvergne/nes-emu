@@ -123,9 +123,22 @@ void Bus::clock() {
         cpuCycleCount_++;
     }
 
-    if (ppu_ && ppu_->nmiRequested()) {
+    // Real 6502 hardware only polls for interrupts at instruction
+    // boundaries (the last cycle of each instruction), never mid-
+    // instruction. Our CPU model executes a whole instruction atomically on
+    // the cycle it's fetched (see Cpu6502::clock()), so cyclesLeft_ > 0
+    // covers exactly the "mid-instruction" window - deliver only when
+    // instructionComplete() is true. Without this gate, nmi()/irq() would
+    // push whatever pc_/status_ happen to be at that moment (already
+    // pointing past the in-flight instruction) and corrupt the instruction
+    // stream; with frequent interrupt sources (e.g. MMC3's per-scanline IRQ)
+    // this was hitting on nearly every scanline instead of being a rare
+    // corner case.
+    bool atInstructionBoundary = cpu_ && cpu_->instructionComplete();
+
+    if (atInstructionBoundary && ppu_ && ppu_->nmiRequested()) {
         ppu_->clearNmiRequest();
-        if (cpu_) cpu_->nmi();
+        cpu_->nmi();
     }
 
     // Mapper-driven IRQ (e.g. MMC3's scanline counter) and/or APU IRQ (frame
@@ -134,7 +147,7 @@ void Bus::clock() {
     // (MMC3: write $E000; APU: read $4015 for the frame IRQ, $4015/$4010
     // writes for the DMC IRQ), so no separate clear step is needed here.
     bool irq = (cartridge_ && cartridge_->irqPending()) || (apu_ && apu_->irqPending());
-    if (irq && cpu_) {
+    if (atInstructionBoundary && irq) {
         cpu_->irq();
     }
 }

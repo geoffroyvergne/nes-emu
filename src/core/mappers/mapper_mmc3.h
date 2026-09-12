@@ -14,10 +14,9 @@ namespace nes {
 // selected by the bank-select register's invert bit).
 //
 // Also implements MMC3's scanline IRQ counter: real hardware clocks it on
-// PPU A12 rising edges, which we approximate (like most simplified NES
-// emulators) by having the PPU call scanlineTick() once per visible/
-// pre-render scanline while rendering is enabled - accurate enough for the
-// split-scroll effects (e.g. status bars) that rely on it.
+// PPU address bus bit 12 (A12) rising edges (roughly once per visible
+// scanline); the PPU approximates this by calling scanlineTick() once at a
+// fixed point in each scanline rather than modeling A12 directly.
 //
 // Known limitation: PRG-RAM enable/write-protect ($A001) is parsed but not
 // enforced - Cartridge always allows $6000-$7FFF reads/writes regardless of

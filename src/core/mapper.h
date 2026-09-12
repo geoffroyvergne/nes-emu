@@ -45,9 +45,9 @@ public:
 
     virtual void reset() {}
 
-    // Called once per visible/pre-render scanline (while rendering is
-    // enabled) so mappers with a scanline-based IRQ counter (MMC3) can clock
-    // it. A no-op for mappers without one.
+    // Clocks a mapper's scanline-based IRQ counter (MMC3) once, called by the
+    // PPU at a fixed point in each visible scanline. A no-op for mappers
+    // without one.
     virtual void scanlineTick() {}
 
     // True if this mapper currently wants to assert the CPU's IRQ line

@@ -40,9 +40,28 @@ constexpr uint32_t kMaxQueuedAudioBytes =
 
 // Playback doesn't start until this much audio is queued, so a stall or a
 // slow frame doesn't immediately run the device dry (an underrun sounds like
-// a sharp click, not silence - frequent ones sound like harsh distortion).
+// a sharp click - like plugging a jack into a live amp - not silence;
+// frequent ones sound like harsh scratchy distortion).
 constexpr uint32_t kAudioPrebufferBytes =
     static_cast<uint32_t>(nes::Apu2A03::kSampleRate) * sizeof(int16_t) * 3 / 20; // ~150ms
+
+// Safety net against the same clicking: if the queue ever gets this low
+// while already playing (a few frames' worth of bad luck/jitter away from
+// running completely dry), proactively pause and re-prebuffer rather than
+// let SDL actually run out and produce an audible click mid-stream. This
+// trades a rare, brief (~150ms) silence gap for never audibly clicking.
+constexpr uint32_t kAudioUnderrunThresholdBytes =
+    static_cast<uint32_t>(nes::Apu2A03::kSampleRate) * sizeof(int16_t) / 100; // ~10ms
+
+// Most games run a hardware-init routine on power-up/reset (clearing RAM and
+// registers in a loop) before they've properly configured the APU, which can
+// produce a brief transient blip in the audio output. Since the prebuffer
+// captures audio from the very first frame, that blip would otherwise become
+// the first thing played back - sounding like an unexpected click right at
+// boot. Discarding (not queuing) audio for this many frames after a
+// reset/start gives that routine time to finish before we start capturing
+// anything, at the cost of a short, deliberate mute window instead.
+constexpr int kAudioStartupMuteFrames = 15; // ~250ms at 60fps.
 
 // The last slice of each frame's wait is a busy-spin instead of a sleep:
 // std::this_thread::sleep_for's OS-level granularity can overshoot by
@@ -294,13 +313,28 @@ int main(int argc, char** argv) {
         auto nextFrameTime = std::chrono::steady_clock::now();
         std::vector<float> audioSamples;
         bool audioStarted = false;
+        int audioMuteFramesRemaining = kAudioStartupMuteFrames;
 
         int fpsFrameCount = 0;
         auto fpsWindowStart = std::chrono::steady_clock::now();
+        int lastGamepadCount = app.gamepadCount();
 
         const std::string statePath = argc > 1 ? stateFilePath(argv[1]) : std::string();
 
         while (app.pollEvents()) {
+            // Opening a newly-connected gamepad (device enumeration) can
+            // itself briefly stall this thread, which could drain the audio
+            // queue enough to click before the per-frame underrun check
+            // below gets a chance to react. Re-prebuffering here absorbs
+            // whatever happened during that stall instead.
+            if (app.gamepadCount() != lastGamepadCount) {
+                lastGamepadCount = app.gamepadCount();
+                app.pauseAudio();
+                app.clearQueuedAudio();
+                audioStarted = false;
+            }
+
+
             if (app.keyPressed(SDL_SCANCODE_EQUALS) || app.keyPressed(SDL_SCANCODE_KP_PLUS)) {
                 speed = std::min(kMaxSpeed, speed + kSpeedStep);
                 updateTitle(app, speed, paused, currentFps);
@@ -321,9 +355,12 @@ int main(int argc, char** argv) {
                 bus.reset();
                 // The APU reset silences everything; drop any stale queued
                 // audio and re-prebuffer rather than play a click into silence.
+                // A real reset also re-runs the game's init routine, so mute
+                // briefly again too (see kAudioStartupMuteFrames).
                 app.pauseAudio();
                 app.clearQueuedAudio();
                 audioStarted = false;
+                audioMuteFramesRemaining = kAudioStartupMuteFrames;
             }
             if (app.keyPressed(SDL_SCANCODE_F)) {
                 app.toggleFullscreen();
@@ -339,9 +376,14 @@ int main(int argc, char** argv) {
             if (!statePath.empty() && app.keyPressed(SDL_SCANCODE_L)) {
                 if (loadStateFromFile(statePath, bus, cpu, ppu, apu, cartridge.get())) {
                     std::printf("State loaded from '%s'.\n", statePath.c_str());
+                    // Jumping the APU's internal state straight to the saved
+                    // point can itself cause a brief discontinuity (e.g. a
+                    // channel's phase suddenly changing), so mute briefly
+                    // here too rather than risk a click.
                     app.pauseAudio();
                     app.clearQueuedAudio();
                     audioStarted = false;
+                    audioMuteFramesRemaining = kAudioStartupMuteFrames;
                 } else {
                     std::printf("No (valid) save state found at '%s'.\n", statePath.c_str());
                 }
@@ -361,6 +403,19 @@ int main(int argc, char** argv) {
 
             audioSamples.clear();
             if (!paused) apu.drainSamples(audioSamples);
+            if (audioMuteFramesRemaining > 0) {
+                if (!paused) audioMuteFramesRemaining--;
+                audioSamples.clear(); // Discard: see kAudioStartupMuteFrames.
+            }
+
+            if (audioStarted && app.queuedAudioBytes() < kAudioUnderrunThresholdBytes) {
+                // About to run dry - stop and re-prebuffer now, before SDL
+                // actually underruns and produces an audible click.
+                app.pauseAudio();
+                app.clearQueuedAudio();
+                audioStarted = false;
+            }
+
             if (app.queuedAudioBytes() < kMaxQueuedAudioBytes) {
                 app.queueAudio(resampleAudio(audioSamples, nes::Apu2A03::kSampleRate, speed, app.audioSampleRate()));
             }

@@ -38,10 +38,8 @@ public:
     // but reading that format isn't implemented yet.
     TvSystem tvSystem() const { return tvSystem_; }
 
-    // Forwarded to the mapper for scanline-IRQ mappers (e.g. MMC3); a no-op
-    // / always-false for mappers that don't use them.
-    void scanlineTick() { mapper_->scanlineTick(); }
     bool irqPending() const { return mapper_->irqPending(); }
+    void scanlineTick() { mapper_->scanlineTick(); }
 
     // Saves/restores PRG RAM, CHR RAM (if present - CHR ROM is immutable and
     // skipped), and the mapper's bank-switching state. Assumes `this` is the

@@ -249,6 +249,30 @@ void Ppu2C02::updateShifters() {
     }
 }
 
+// Pattern-table address for sprite `spriteIndex`'s low bitplane on the
+// current scanline (high bitplane is this address + 8).
+uint16_t Ppu2C02::spritePatternAddressLo(uint8_t spriteIndex) const {
+    const SpriteEntry& sprite = spritesOnScanline_[spriteIndex];
+    uint8_t spriteHeight = (control_ & kCtrlSpriteSize) ? 16 : 8;
+    bool flipV = sprite.attribute & 0x80;
+    int16_t rowInSprite = static_cast<int16_t>(scanline_) - static_cast<int16_t>(sprite.y);
+
+    if (spriteHeight == 8) {
+        uint16_t base = (control_ & kCtrlPatternSprite) ? 0x1000 : 0x0000;
+        uint8_t row = flipV ? static_cast<uint8_t>(7 - rowInSprite) : static_cast<uint8_t>(rowInSprite);
+        return static_cast<uint16_t>(base | (sprite.id << 4) | row);
+    }
+    uint16_t base = (sprite.id & 0x01) ? 0x1000 : 0x0000;
+    uint8_t tile = sprite.id & 0xFE;
+    uint8_t row = static_cast<uint8_t>(rowInSprite);
+    if (flipV) row = static_cast<uint8_t>(15 - rowInSprite);
+    if (row >= 8) {
+        tile++;
+        row -= 8;
+    }
+    return static_cast<uint16_t>(base | (tile << 4) | row);
+}
+
 // ---------------------------------------------------------------------------
 // Main clock
 // ---------------------------------------------------------------------------
@@ -316,8 +340,11 @@ void Ppu2C02::clock() {
             transferAddressY();
         }
 
-        // Approximates the real PPU A12-rising-edge signal MMC3-style
-        // mappers clock their scanline IRQ counter from (see mapper_mmc3.h).
+        // MMC3-style mappers clock their scanline IRQ counter from PPU
+        // address bus bit 12 (A12) rising edges, which happen naturally
+        // around this point in the scanline as the PPU shifts from
+        // background to sprite pattern-table fetches. Cycle 260 is a
+        // well-established fixed-point approximation of that transition.
         if (cycle_ == 260 && (mask_ & (kMaskRenderBg | kMaskRenderSprites)) && cartridge_) {
             cartridge_->scanlineTick();
         }
@@ -349,27 +376,8 @@ void Ppu2C02::clock() {
 
         if (cycle_ == 340) {
             for (uint8_t i = 0; i < spriteCount_; i++) {
-                uint16_t patternAddrLo;
-                uint8_t spriteHeight = (control_ & kCtrlSpriteSize) ? 16 : 8;
-                bool flipV = spritesOnScanline_[i].attribute & 0x80;
+                uint16_t patternAddrLo = spritePatternAddressLo(i);
                 bool flipH = spritesOnScanline_[i].attribute & 0x40;
-                int16_t rowInSprite = static_cast<int16_t>(scanline_) - static_cast<int16_t>(spritesOnScanline_[i].y);
-
-                if (spriteHeight == 8) {
-                    uint16_t base = (control_ & kCtrlPatternSprite) ? 0x1000 : 0x0000;
-                    uint8_t row = flipV ? static_cast<uint8_t>(7 - rowInSprite) : static_cast<uint8_t>(rowInSprite);
-                    patternAddrLo = static_cast<uint16_t>(base | (spritesOnScanline_[i].id << 4) | row);
-                } else {
-                    uint16_t base = (spritesOnScanline_[i].id & 0x01) ? 0x1000 : 0x0000;
-                    uint8_t tile = spritesOnScanline_[i].id & 0xFE;
-                    uint8_t row = static_cast<uint8_t>(rowInSprite);
-                    if (flipV) row = static_cast<uint8_t>(15 - rowInSprite);
-                    if (row >= 8) {
-                        tile++;
-                        row -= 8;
-                    }
-                    patternAddrLo = static_cast<uint16_t>(base | (tile << 4) | row);
-                }
 
                 uint8_t lo = ppuRead(patternAddrLo);
                 uint8_t hi = ppuRead(static_cast<uint16_t>(patternAddrLo + 8));
