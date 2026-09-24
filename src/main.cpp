@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +25,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 #include <memory>
 #include <optional>
 
@@ -80,6 +82,11 @@ public:
     [[nodiscard]] bool isOpen() const { return id != 0; }
     [[nodiscard]] int getSampleRate() const { return obtained.freq; }
     [[nodiscard]] std::size_t getQueuedSamples() const { return SDL_GetQueuedAudioSize(id) / sizeof(float); }
+    void clear() { SDL_ClearQueuedAudio(id); }
+    void queueSilence(std::size_t count) {
+        const std::vector<float> silence(count, 0.0f);
+        queue(silence);
+    }
     void queue(std::span<const float> samples) {
         if (!samples.empty()) {
             SDL_QueueAudio(id, samples.data(), static_cast<std::uint32_t>(samples.size_bytes()));
@@ -172,8 +179,8 @@ void updateWindowTitle(SDL_Window* window, std::string_view region, bool showDeb
     SDL_SetWindowTitle(window, title.c_str());
 }
 
-// Paces emulation by wall-clock time when there is no audio device to pace it: keeps a schedule of
-// frame deadlines at exactly the NES rate, independent of the display refresh rate.
+// Paces emulation by wall-clock time: keeps a schedule of frame deadlines at exactly the region's
+// frame rate, independent of the display refresh rate and of when SDL_RenderPresent returns.
 class FrameLimiter {
 public:
     using Clock = std::chrono::steady_clock;
@@ -196,10 +203,59 @@ public:
         return due;
     }
     void sleepUntilNextFrame() const { std::this_thread::sleep_until(nextFrame); }
+    // Scheduled start of the most recent frame returned by takeDueFrames().
+    [[nodiscard]] Clock::time_point lastFrameDeadline() const { return nextFrame - framePeriod; }
 
 private:
     Clock::duration framePeriod;
     Clock::time_point nextFrame;
+};
+
+// Presents each frame at a fixed offset after its scheduled deadline instead of as soon as it's
+// ready. Emulating a frame takes a variable 3-8 ms, and presenting "when done" hands that variation
+// straight to the display; a fixed offset makes frame delivery as regular as the sleep timer. The
+// offset follows the slowest recent frames (instant rise, slow decay) plus a small margin, so it
+// costs only a few ms of latency.
+class PresentScheduler {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    void waitForPresentTime(Clock::time_point frameDeadline) {
+        const auto workTime = Clock::now() - frameDeadline; // Wake-up delay + emulation + drawing
+        offset = std::min(std::max(workTime + MARGIN, offset - DECAY_PER_FRAME), MAX_OFFSET);
+        std::this_thread::sleep_until(frameDeadline + offset);
+    }
+
+private:
+    static constexpr Clock::duration MARGIN = std::chrono::microseconds(500);
+    static constexpr Clock::duration DECAY_PER_FRAME = std::chrono::microseconds(20);
+    static constexpr Clock::duration MAX_OFFSET = std::chrono::milliseconds(10);
+    Clock::duration offset{};
+};
+
+// Dynamic audio rate control: the wall clock paces emulation, so the audio queue would slowly drift
+// (the system clock and the sound card's clock never agree exactly). This
+// nudges the APU's output sample rate proportionally to the queue error, by at most +-0.5%
+// (under 9 cents of pitch, inaudible), keeping the queue near its target without clicks.
+class AudioRateControl {
+public:
+    AudioRateControl(int deviceSampleRate, std::size_t targetSamples)
+        : deviceRate(deviceSampleRate), target(targetSamples) {}
+
+    [[nodiscard]] int sampleRateFor(std::size_t queued) const {
+        const double error = (static_cast<double>(target) - static_cast<double>(queued)) / static_cast<double>(target);
+        // Full correction at half the target's worth of error, so the queue settles close to target.
+        const double adjust = 1.0 + MAX_DEVIATION * std::clamp(2.0 * error, -1.0, 1.0); // Running low -> make more
+        return static_cast<int>(std::lround(deviceRate * adjust));
+    }
+    // Start-up, an underrun, or a long stall: re-prime the queue at the target level.
+    [[nodiscard]] bool needsReprime(std::size_t queued) const { return queued == 0 || queued > 4 * target; }
+    [[nodiscard]] std::size_t getTarget() const { return target; }
+
+private:
+    static constexpr double MAX_DEVIATION = 0.005;
+    int deviceRate;
+    std::size_t target;
 };
 
 // Emulated frames per second over the last second, for the title bar.
@@ -249,11 +305,11 @@ bool mapKeyToButton(SDL_Keycode key, Controller::Button& button) {
     }
 }
 
-// Audio pacing: keep about this much sound queued. Low enough for responsive audio, high enough
-// to ride out a late display refresh.
+// Audio queue target (latency). The queue settles near it, offset by the small error the rate
+// control needs to produce its correction, and must absorb 11.6 ms device chunks plus a frame.
 constexpr int AUDIO_QUEUE_TARGET_MS = 50;
-// Upper bound on frames emulated per display refresh (catch-up after a stall, without spiralling).
-constexpr int MAX_FRAMES_PER_REFRESH = 4;
+// Upper bound on frames emulated in one catch-up (after a stall), without spiralling.
+constexpr int MAX_FRAMES_PER_UPDATE = 4;
 
 // Spreads PPU dots over CPU cycles at the region's exact ratio: 3 per cycle on NTSC; 3.2 on PAL,
 // i.e. 16 dots every 5 CPU cycles (3, 3, 3, 3, 4).
@@ -289,6 +345,27 @@ void runFrame(Cpu6502& cpu, Ppu2C02& ppu, Apu2A03& apu, Bus& bus, PpuDotDivider&
             cpu.nmi();
         }
     } while (!ppu.pollFrameComplete());
+}
+
+// Runs the frames whose deadline has passed and streams their audio. Returns how many ran.
+int emulateDueFrames(FrameLimiter& limiter, AudioDevice& audio, const AudioRateControl& rateControl, Cpu6502& cpu,
+                     Ppu2C02& ppu, Apu2A03& apu, Bus& bus, PpuDotDivider& dotDivider) {
+    const int due = limiter.takeDueFrames(MAX_FRAMES_PER_UPDATE);
+    for (int i = 0; i < due; ++i) {
+        if (audio.isOpen()) {
+            if (rateControl.needsReprime(audio.getQueuedSamples())) {
+                audio.clear();
+                audio.queueSilence(rateControl.getTarget());
+            }
+            apu.setSampleRate(rateControl.sampleRateFor(audio.getQueuedSamples()));
+        }
+        runFrame(cpu, ppu, apu, bus, dotDivider);
+        if (audio.isOpen()) {
+            audio.queue(apu.getSamples());
+        }
+        apu.clearSamples();
+    }
+    return due;
 }
 
 // nestest.nes runs its full automated suite when started at $C000 instead of the reset vector.
@@ -462,15 +539,17 @@ int main(int argc, char* argv[]) {
     }
 
     AudioDevice audio(Apu2A03::DEFAULT_SAMPLE_RATE);
-    std::size_t audioQueueTarget = 0;
+    const int deviceSampleRate = audio.isOpen() ? audio.getSampleRate() : Apu2A03::DEFAULT_SAMPLE_RATE;
+    const AudioRateControl rateControl(deviceSampleRate,
+                                       static_cast<std::size_t>(deviceSampleRate * AUDIO_QUEUE_TARGET_MS / 1000));
     if (audio.isOpen()) {
-        apu.setSampleRate(audio.getSampleRate());
-        audioQueueTarget = static_cast<std::size_t>(audio.getSampleRate() * AUDIO_QUEUE_TARGET_MS / 1000);
+        apu.setSampleRate(deviceSampleRate);
     } else {
         std::cerr << "Warning: no audio device (" << SDL_GetError() << "); running without sound\n";
     }
 
     FrameLimiter frameLimiter(timing.frameRate());
+    PresentScheduler presentScheduler;
     FpsCounter fpsCounter;
     bool showDebugView = false;
     std::uint8_t debugPaletteId = 0;
@@ -517,36 +596,14 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Timing has exactly one master clock, never two (they would drift against each other):
-        //  - with sound, the audio device: it drains samples at its exact rate, and the APU makes
-        //    exactly rate / 60.0988 samples per frame, so topping the queue up to ~50 ms runs the
-        //    NES at 60.0988 fps and keeps latency bounded (the queue can't grow past target + 1 frame);
-        //  - without sound, wall-clock deadlines (FrameLimiter).
-        // Either way the display refresh rate (60, 120 Hz, VRR...) doesn't change game speed.
-        int framesRun = 0;
-        if (audio.isOpen()) {
-            while (framesRun < MAX_FRAMES_PER_REFRESH && audio.getQueuedSamples() < audioQueueTarget) {
-                runFrame(cpu, ppu, apu, bus, dotDivider);
-                audio.queue(apu.getSamples());
-                apu.clearSamples();
-                ++framesRun;
-            }
-            if (framesRun == 0) {
-                SDL_Delay(1); // Queue is full (e.g. vsync not blocking while minimised): don't spin
-            }
-        } else {
-            framesRun = frameLimiter.takeDueFrames(MAX_FRAMES_PER_REFRESH);
-            for (int i = 0; i < framesRun; ++i) {
-                runFrame(cpu, ppu, apu, bus, dotDivider);
-                apu.clearSamples();
-            }
-            if (framesRun == 0) {
-                frameLimiter.sleepUntilNextFrame();
-            }
-        }
-        if (fpsCounter.addFrames(framesRun)) {
-            updateWindowTitle(window.get(), timing.name, showDebugView, debugPaletteId, fpsCounter.getFps());
-        }
+        // Pacing: sleep until the next frame deadline, emulate, then present exactly once, at a fixed
+        // offset after the deadline (PresentScheduler). New frames reach the display every 16.64 ms
+        // (NTSC) / 20.0 ms (PAL) with no bursts, whatever the refresh rate. SDL_RenderPresent's own
+        // timing is not used: on macOS/Metal it returns at irregular times (0-16 ms apart), so it
+        // can't pace anything. Audio follows via AudioRateControl.
+        frameLimiter.sleepUntilNextFrame();
+        const int framesRun = emulateDueFrames(frameLimiter, audio, rateControl, cpu, ppu, apu, bus, dotDivider);
+
 
         SDL_SetRenderDrawColor(renderer.get(), 0, 0, 0, 255);
         SDL_RenderClear(renderer.get());
@@ -557,7 +614,15 @@ int main(int argc, char* argv[]) {
             // runFrame() stops at the end of the frame, so the buffer holds a complete picture.
             drawFrame(renderer.get(), frameTexture.get(), ppu.getFrameBuffer());
         }
+        if (framesRun > 0) {
+            presentScheduler.waitForPresentTime(frameLimiter.lastFrameDeadline());
+        }
         SDL_RenderPresent(renderer.get());
+
+        // After the present, so its cost (up to a few ms on macOS) comes out of the sleep, not the frame.
+        if (fpsCounter.addFrames(framesRun)) {
+            updateWindowTitle(window.get(), timing.name, showDebugView, debugPaletteId, fpsCounter.getFps());
+        }
     }
 
     return EXIT_SUCCESS;
