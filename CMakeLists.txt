@@ -21,11 +21,15 @@ find_package(SDL2 REQUIRED CONFIG)
 
 add_executable(NesEmulator
     src/main.cpp
+    src/Apu2A03.cpp
     src/Bus.cpp
     src/Cartridge.cpp
     src/Controller.cpp
     src/Cpu6502.cpp
+    src/NoiseChannel.cpp
     src/Ppu2C02.cpp
+    src/PulseChannel.cpp
+    src/TriangleChannel.cpp
 )
 
 target_include_directories(NesEmulator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

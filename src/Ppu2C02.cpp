@@ -63,6 +63,11 @@ void Ppu2C02::connectCartridge(std::shared_ptr<Cartridge> newCartridge) {
     cartridge = std::move(newCartridge);
 }
 
+void Ppu2C02::setRegion(const RegionTiming& timing) {
+    scanlinesPerFrame = timing.scanlinesPerFrame;
+    skipsOddFrameDot = timing.skipsOddFrameDot;
+}
+
 void Ppu2C02::reset() {
     ctrl = 0x00;
     mask = 0x00;
@@ -462,7 +467,7 @@ void Ppu2C02::renderFrame(FrameSpan frame) {
 
 void Ppu2C02::clock() {
     const bool visibleLine = scanline < SCREEN_HEIGHT;
-    const bool preRenderLine = scanline == PRE_RENDER_SCANLINE;
+    const bool preRenderLine = scanline == scanlinesPerFrame - 1;
 
     if (visibleLine && cycle == 1) {
         // Draw the whole line from the scroll position in v. Mid-line register writes take effect
@@ -503,14 +508,14 @@ void Ppu2C02::clock() {
     }
 
     ++cycle;
-    // With rendering on, odd frames skip the last dot of the pre-render line.
-    if (preRenderLine && cycle == DOTS_PER_SCANLINE - 1 && oddFrame && isRenderingEnabled()) {
+    // NTSC only: with rendering on, odd frames skip the last dot of the pre-render line.
+    if (preRenderLine && cycle == DOTS_PER_SCANLINE - 1 && oddFrame && skipsOddFrameDot && isRenderingEnabled()) {
         ++cycle;
     }
     if (cycle >= DOTS_PER_SCANLINE) {
         cycle = 0;
         sprite0HitCycle = -1;
-        if (++scanline >= SCANLINES_PER_FRAME) {
+        if (++scanline >= scanlinesPerFrame) {
             scanline = 0;
             oddFrame = !oddFrame;
             frameComplete = true;

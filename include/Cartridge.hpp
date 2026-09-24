@@ -2,7 +2,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include "Region.hpp"
+
 #include <filesystem>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -42,6 +45,9 @@ public:
     [[nodiscard]] Mirroring getMirroring() const { return mirroring; }
     [[nodiscard]] bool hasTrainer() const { return trainerPresent; }
     [[nodiscard]] bool hasBatteryRam() const { return batteryRam; }
+    // TV system declared in the header, if any: NES 2.0 byte 12, or iNES byte 9 bit 0 when the header
+    // is trustworthy. Most iNES 1.0 dumps leave it unset (reads as "none"), so callers need a fallback.
+    [[nodiscard]] std::optional<Region> getHeaderRegion() const { return headerRegion; }
     // True when the cartridge has no CHR-ROM and uses 8KB of CHR-RAM instead.
     [[nodiscard]] bool usesChrRam() const { return chrBankCount == 0; }
 
@@ -58,4 +64,5 @@ private:
     Mirroring mirroring = Mirroring::Horizontal;
     bool trainerPresent = false;
     bool batteryRam = false;
+    std::optional<Region> headerRegion;
 };

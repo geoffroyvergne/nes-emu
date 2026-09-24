@@ -91,6 +91,18 @@ Cartridge::Cartridge(const std::filesystem::path& romPath) {
     const auto upperNibble = static_cast<std::uint8_t>(header.flags7 & 0xF0);
     mapperId = (isNes2 || tailIsClean) ? static_cast<std::uint8_t>(upperNibble | lowerNibble) : lowerNibble;
 
+    // TV system. padding[] holds header bytes 8-15, so byte 9 = padding[1] and byte 12 = padding[4].
+    if (isNes2) {
+        // Byte 12 bits 0-1: 0 = NTSC, 1 = PAL, 2 = multi-region (runs on NTSC), 3 = Dendy (50 Hz,
+        // closest to PAL timing).
+        const int timing = header.padding[4] & 0x03;
+        headerRegion = (timing == 1 || timing == 3) ? Region::Pal : Region::Ntsc;
+    } else if (tailIsClean && (header.padding[1] & 0xFE) == 0 && (header.padding[1] & 0x01) != 0) {
+        // iNES 1.0 byte 9 bit 0 = PAL; the other bits are reserved, so any junk means "don't trust it".
+        // A clear bit is the default for most dumps and says nothing, so only PAL is reported.
+        headerRegion = Region::Pal;
+    }
+
     if (trainerPresent) {
         file.seekg(static_cast<std::streamoff>(TRAINER_SIZE), std::ios::cur);
     }

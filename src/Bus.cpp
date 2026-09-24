@@ -1,5 +1,6 @@
 #include "Bus.hpp"
 
+#include "Apu2A03.hpp"
 #include "Cartridge.hpp"
 #include "Ppu2C02.hpp"
 
@@ -34,7 +35,10 @@ void Bus::cpuWrite(std::uint16_t addr, std::uint8_t data) {
             controller.writeStrobe(data);
         }
     } else if (addr <= APU_IO_END) {
-        // TODO(Step 5): APU registers ($4000-$4013, $4015, $4017 frame counter).
+        // $4000-$4013, $4015, $4017 (frame counter); $4018-$401F are unused test registers.
+        if (apu != nullptr) {
+            apu->cpuWrite(addr, data);
+        }
     } else if (cartridge) {
         cartridge->cpuWrite(addr, data);
     }
@@ -70,8 +74,12 @@ std::uint8_t Bus::cpuRead(std::uint16_t addr, bool readOnly) {
         }
     } else if (addr == CONTROLLER_1 || addr == CONTROLLER_2) {
         data = controllers[addr - CONTROLLER_1].read(readOnly);
+    } else if (addr == APU_STATUS) {
+        if (apu != nullptr) {
+            data = apu->readStatus(readOnly);
+        }
     } else if (addr <= APU_IO_END) {
-        // TODO(Step 5): APU status ($4015).
+        // Other APU registers are write-only.
     } else if (cartridge) {
         cartridge->cpuRead(addr, data);
     }

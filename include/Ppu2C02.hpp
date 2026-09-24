@@ -4,6 +4,8 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include "Region.hpp"
+
 #include <memory>
 #include <span>
 
@@ -18,10 +20,10 @@ class Cartridge;
 //   $3F00-$3FFF  Palette RAM (32 bytes, mirrored)
 class Ppu2C02 {
 public:
-    static constexpr int SCANLINES_PER_FRAME = 262; // 0-239 visible, 240 post-render, 241-260 VBlank, 261 pre-render
+    // Scanlines: 0-239 visible, 240 post-render, 241.. VBlank, last line = pre-render
+    // (NTSC: 262 lines, pre-render 261; PAL: 312 lines, pre-render 311).
     static constexpr int DOTS_PER_SCANLINE = 341;
     static constexpr int VBLANK_SCANLINE = 241;
-    static constexpr int PRE_RENDER_SCANLINE = 261;
 
     static constexpr int SCREEN_WIDTH = 256;
     static constexpr int SCREEN_HEIGHT = 240;
@@ -155,6 +157,10 @@ public:
 
     void connectCartridge(std::shared_ptr<Cartridge> newCartridge);
     void reset();
+    // Frame geometry for the console region (NTSC by default).
+    void setRegion(const RegionTiming& timing);
+    [[nodiscard]] int getScanlinesPerFrame() const { return scanlinesPerFrame; }
+    [[nodiscard]] int getPreRenderScanline() const { return scanlinesPerFrame - 1; }
 
     // CPU side: addr is any address in $2000-$3FFF (mirrored every 8 bytes).
     // readOnly reads have no side effects (no VBlank clear, no latch reset, no buffer update).
@@ -258,5 +264,7 @@ private:
     bool nmiRequested = false;
     bool frameComplete = false;
     bool oddFrame = false;
+    int scanlinesPerFrame = NTSC_TIMING.scanlinesPerFrame;
+    bool skipsOddFrameDot = NTSC_TIMING.skipsOddFrameDot;
     int sprite0HitCycle = -1; // Dot on the current scanline where sprite 0 hit is raised, -1 if none
 };

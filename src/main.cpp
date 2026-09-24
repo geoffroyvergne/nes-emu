@@ -1,22 +1,31 @@
+#include "Apu2A03.hpp"
 #include "Bus.hpp"
 #include "Cartridge.hpp"
 #include "Controller.hpp"
 #include "Cpu6502.hpp"
 #include "Ppu2C02.hpp"
+#include "Region.hpp"
 
 #include <SDL.h>
 
+#include <algorithm>
 #include <array>
+#include <cctype>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <memory>
+#include <optional>
 
 namespace {
 
@@ -40,6 +49,47 @@ struct SdlTextureDeleter {
 using WindowPtr = std::unique_ptr<SDL_Window, SdlWindowDeleter>;
 using RendererPtr = std::unique_ptr<SDL_Renderer, SdlRendererDeleter>;
 using TexturePtr = std::unique_ptr<SDL_Texture, SdlTextureDeleter>;
+
+// SDL audio device in queue mode (no callback): mono float samples pushed with SDL_QueueAudio.
+class AudioDevice {
+public:
+    explicit AudioDevice(int requestedSampleRate) {
+        // Initialised separately from video so a missing audio backend only costs the sound.
+        if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+            return;
+        }
+        SDL_AudioSpec want{};
+        want.freq = requestedSampleRate;
+        want.format = AUDIO_F32SYS;
+        want.channels = 1;
+        want.samples = 512;
+        // Only the rate may differ from the request; SDL converts format/channels for us.
+        id = SDL_OpenAudioDevice(nullptr, 0, &want, &obtained, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+        if (id != 0) {
+            SDL_PauseAudioDevice(id, 0);
+        }
+    }
+    ~AudioDevice() {
+        if (id != 0) {
+            SDL_CloseAudioDevice(id);
+        }
+    }
+    AudioDevice(const AudioDevice&) = delete;
+    AudioDevice& operator=(const AudioDevice&) = delete;
+
+    [[nodiscard]] bool isOpen() const { return id != 0; }
+    [[nodiscard]] int getSampleRate() const { return obtained.freq; }
+    [[nodiscard]] std::size_t getQueuedSamples() const { return SDL_GetQueuedAudioSize(id) / sizeof(float); }
+    void queue(std::span<const float> samples) {
+        if (!samples.empty()) {
+            SDL_QueueAudio(id, samples.data(), static_cast<std::uint32_t>(samples.size_bytes()));
+        }
+    }
+
+private:
+    SDL_AudioDeviceID id = 0;
+    SDL_AudioSpec obtained{};
+};
 
 // Owns SDL subsystem initialisation for the lifetime of the object.
 class SdlContext {
@@ -114,13 +164,68 @@ void drawPaletteSwatches(SDL_Renderer* renderer, Ppu2C02& ppu, std::uint8_t sele
     SDL_RenderDrawRect(renderer, &outline);
 }
 
-void updateWindowTitle(SDL_Window* window, bool showDebugView, std::uint8_t paletteId) {
+void updateWindowTitle(SDL_Window* window, std::string_view region, bool showDebugView, std::uint8_t paletteId, double fps) {
     const std::string title =
-        showDebugView ? std::format("NES Emulator - pattern tables, palette {} ({}) - P: next palette, Tab: game",
-                                    paletteId, paletteId < Ppu2C02::PALETTE_COUNT / 2 ? "background" : "sprite")
-                      : std::string("NES Emulator - Tab: debug view");
+        showDebugView ? std::format("NES Emulator [{}] ({:.1f} fps) - pattern tables, palette {} ({}) - P: next palette, Tab: game",
+                                    region, fps, paletteId, paletteId < Ppu2C02::PALETTE_COUNT / 2 ? "background" : "sprite")
+                      : std::format("NES Emulator [{}] ({:.1f} fps) - Tab: debug view", region, fps);
     SDL_SetWindowTitle(window, title.c_str());
 }
+
+// Paces emulation by wall-clock time when there is no audio device to pace it: keeps a schedule of
+// frame deadlines at exactly the NES rate, independent of the display refresh rate.
+class FrameLimiter {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    explicit FrameLimiter(double framesPerSecond)
+        : framePeriod(std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / framesPerSecond))),
+          nextFrame(Clock::now()) {}
+
+    // Number of frames whose deadline has passed (at most maxFrames), advancing the schedule.
+    int takeDueFrames(int maxFrames) {
+        const auto now = Clock::now();
+        int due = 0;
+        while (due < maxFrames && nextFrame <= now) {
+            nextFrame += framePeriod;
+            ++due;
+        }
+        if (nextFrame < now) {
+            nextFrame = now; // Too far behind (debugger, window drag): resync instead of fast-forwarding
+        }
+        return due;
+    }
+    void sleepUntilNextFrame() const { std::this_thread::sleep_until(nextFrame); }
+
+private:
+    Clock::duration framePeriod;
+    Clock::time_point nextFrame;
+};
+
+// Emulated frames per second over the last second, for the title bar.
+class FpsCounter {
+public:
+    using Clock = std::chrono::steady_clock;
+    // Returns true (and updates fps) once per second.
+    bool addFrames(int count) {
+        frames += count;
+        const auto now = Clock::now();
+        const std::chrono::duration<double> elapsed = now - windowStart;
+        if (elapsed.count() < 1.0) {
+            return false;
+        }
+        fps = frames / elapsed.count();
+        frames = 0;
+        windowStart = now;
+        return true;
+    }
+    [[nodiscard]] double getFps() const { return fps; }
+
+private:
+    Clock::time_point windowStart = Clock::now();
+    int frames = 0;
+    double fps = 0.0;
+};
 
 void drawFrame(SDL_Renderer* renderer, SDL_Texture* texture, const Ppu2C02::FrameBuffer& frame) {
     constexpr int pitch = Ppu2C02::SCREEN_WIDTH * static_cast<int>(sizeof(std::uint32_t));
@@ -144,17 +249,40 @@ bool mapKeyToButton(SDL_Keycode key, Controller::Button& button) {
     }
 }
 
-// NTSC: the PPU draws 3 dots for every CPU cycle.
-constexpr int PPU_DOTS_PER_CPU_CYCLE = 3;
+// Audio pacing: keep about this much sound queued. Low enough for responsive audio, high enough
+// to ride out a late display refresh.
+constexpr int AUDIO_QUEUE_TARGET_MS = 50;
+// Upper bound on frames emulated per display refresh (catch-up after a stall, without spiralling).
+constexpr int MAX_FRAMES_PER_REFRESH = 4;
+
+// Spreads PPU dots over CPU cycles at the region's exact ratio: 3 per cycle on NTSC; 3.2 on PAL,
+// i.e. 16 dots every 5 CPU cycles (3, 3, 3, 3, 4).
+class PpuDotDivider {
+public:
+    explicit PpuDotDivider(const RegionTiming& timing)
+        : numerator(timing.ppuDotsPerCpuCycleNum), denominator(timing.ppuDotsPerCpuCycleDen) {}
+    int dotsForNextCpuCycle() {
+        remainder += numerator;
+        const int dots = remainder / denominator;
+        remainder -= dots * denominator;
+        return dots;
+    }
+
+private:
+    int numerator;
+    int denominator;
+    int remainder = 0;
+};
 
 // Runs the system until the PPU finishes a frame (~29781 CPU cycles).
-void runFrame(Cpu6502& cpu, Ppu2C02& ppu, Bus& bus) {
+void runFrame(Cpu6502& cpu, Ppu2C02& ppu, Apu2A03& apu, Bus& bus, PpuDotDivider& dotDivider) {
     do {
         cpu.clock();
+        apu.clock();
         if (bus.pollOamDma()) {
             cpu.stallForOamDma();
         }
-        for (int dot = 0; dot < PPU_DOTS_PER_CPU_CYCLE; ++dot) {
+        for (int dot = dotDivider.dotsForNextCpuCycle(); dot > 0; --dot) {
             ppu.clock();
         }
         if (ppu.pollNmi()) {
@@ -191,15 +319,52 @@ int runCpuTrace(Cpu6502& cpu) {
     return EXIT_SUCCESS;
 }
 
+// Region hint from the usual dump naming conventions, e.g. "Game (E).nes", "Game (Europe).nes".
+std::optional<Region> regionFromFileName(const std::filesystem::path& path) {
+    std::string name = path.filename().string();
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    for (std::string_view tag : {"(e)", "(europe)", "(pal)", "(eu)", "(g)", "(germany)", "(f)", "(france)", "(uk)", "(australia)"}) {
+        if (name.find(tag) != std::string::npos) {
+            return Region::Pal;
+        }
+    }
+    for (std::string_view tag : {"(u)", "(usa)", "(j)", "(japan)", "(ntsc)", "(jue)", "(ju)", "(ue)", "(world)"}) {
+        if (name.find(tag) != std::string::npos) {
+            return Region::Ntsc;
+        }
+    }
+    return std::nullopt;
+}
+
+// Picks the console region: command line > ROM header > file name > NTSC. Returns it with its source.
+std::pair<Region, std::string_view> resolveRegion(std::optional<Region> forced, const Cartridge& cartridge,
+                                                  const std::filesystem::path& romPath) {
+    if (forced) {
+        return {*forced, "command line"};
+    }
+    if (const auto header = cartridge.getHeaderRegion()) {
+        return {*header, "ROM header"};
+    }
+    if (const auto fromName = regionFromFileName(romPath)) {
+        return {*fromName, "file name"};
+    }
+    return {Region::Ntsc, "default"};
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
     bool testMode = false;
+    std::optional<Region> forcedRegion;
     const char* romPath = nullptr;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
         if (arg == "--test-mode") {
             testMode = true;
+        } else if (arg == "--pal") {
+            forcedRegion = Region::Pal;
+        } else if (arg == "--ntsc") {
+            forcedRegion = Region::Ntsc;
         } else if (romPath == nullptr && !arg.starts_with("--")) {
             romPath = argv[i];
         } else {
@@ -208,8 +373,9 @@ int main(int argc, char* argv[]) {
         }
     }
     if (romPath == nullptr) {
-        std::cerr << "Usage: " << argv[0] << " [--test-mode] <path/to/game.nes>\n"
-                  << "  --test-mode  run the CPU headless from $C000 (nestest.nes) and write "
+        std::cerr << "Usage: " << argv[0] << " [--pal | --ntsc] [--test-mode] <path/to/game.nes>\n"
+                  << "  --pal/--ntsc  force the console region (default: ROM header, then file name, then NTSC)\n"
+                  << "  --test-mode   run the CPU headless from $C000 (nestest.nes) and write "
                   << TRACE_LOG_PATH << '\n';
         return EXIT_FAILURE;
     }
@@ -222,6 +388,11 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
     printCartridgeInfo(*cartridge);
+    const auto [region, regionSource] = resolveRegion(forcedRegion, *cartridge, romPath);
+    const RegionTiming& timing = timingFor(region);
+    std::cout << std::format("Region:    {} (from {}): CPU {} Hz, {:.4f} fps, {} CPU cycles/frame", timing.name,
+                             regionSource, timing.cpuClockHz, timing.frameRate(), timing.cpuCyclesPerFrame())
+              << std::endl;
     if (cartridge->getMapperId() != 0) {
         std::cerr << "Warning: mapper " << +cartridge->getMapperId()
                   << " is not supported yet; using mapper 0 (NROM) layout\n";
@@ -230,10 +401,16 @@ int main(int argc, char* argv[]) {
     // Declared before the bus, which keeps a non-owning pointer to it.
     Ppu2C02 ppu;
     ppu.connectCartridge(cartridge);
+    ppu.setRegion(timing);
+    PpuDotDivider dotDivider(timing);
+
+    Apu2A03 apu;
+    apu.setRegion(timing);
 
     Bus bus;
     bus.insertCartridge(cartridge);
     bus.connectPpu(ppu);
+    bus.connectApu(apu);
 
     Cpu6502 cpu(bus);
     cpu.reset();
@@ -284,9 +461,20 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
+    AudioDevice audio(Apu2A03::DEFAULT_SAMPLE_RATE);
+    std::size_t audioQueueTarget = 0;
+    if (audio.isOpen()) {
+        apu.setSampleRate(audio.getSampleRate());
+        audioQueueTarget = static_cast<std::size_t>(audio.getSampleRate() * AUDIO_QUEUE_TARGET_MS / 1000);
+    } else {
+        std::cerr << "Warning: no audio device (" << SDL_GetError() << "); running without sound\n";
+    }
+
+    FrameLimiter frameLimiter(timing.frameRate());
+    FpsCounter fpsCounter;
     bool showDebugView = false;
     std::uint8_t debugPaletteId = 0;
-    updateWindowTitle(window.get(), showDebugView, debugPaletteId);
+    updateWindowTitle(window.get(), timing.name, showDebugView, debugPaletteId, fpsCounter.getFps());
 
     bool isRunning = true;
     while (isRunning) {
@@ -311,10 +499,10 @@ int main(int argc, char* argv[]) {
                     isRunning = false;
                 } else if (event.key.keysym.sym == SDLK_TAB) {
                     showDebugView = !showDebugView;
-                    updateWindowTitle(window.get(), showDebugView, debugPaletteId);
+                    updateWindowTitle(window.get(), timing.name, showDebugView, debugPaletteId, fpsCounter.getFps());
                 } else if (event.key.keysym.sym == SDLK_p && showDebugView) {
                     debugPaletteId = static_cast<std::uint8_t>((debugPaletteId + 1) % Ppu2C02::PALETTE_COUNT);
-                    updateWindowTitle(window.get(), showDebugView, debugPaletteId);
+                    updateWindowTitle(window.get(), timing.name, showDebugView, debugPaletteId, fpsCounter.getFps());
                 }
                 break;
             }
@@ -329,7 +517,36 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        runFrame(cpu, ppu, bus);
+        // Timing has exactly one master clock, never two (they would drift against each other):
+        //  - with sound, the audio device: it drains samples at its exact rate, and the APU makes
+        //    exactly rate / 60.0988 samples per frame, so topping the queue up to ~50 ms runs the
+        //    NES at 60.0988 fps and keeps latency bounded (the queue can't grow past target + 1 frame);
+        //  - without sound, wall-clock deadlines (FrameLimiter).
+        // Either way the display refresh rate (60, 120 Hz, VRR...) doesn't change game speed.
+        int framesRun = 0;
+        if (audio.isOpen()) {
+            while (framesRun < MAX_FRAMES_PER_REFRESH && audio.getQueuedSamples() < audioQueueTarget) {
+                runFrame(cpu, ppu, apu, bus, dotDivider);
+                audio.queue(apu.getSamples());
+                apu.clearSamples();
+                ++framesRun;
+            }
+            if (framesRun == 0) {
+                SDL_Delay(1); // Queue is full (e.g. vsync not blocking while minimised): don't spin
+            }
+        } else {
+            framesRun = frameLimiter.takeDueFrames(MAX_FRAMES_PER_REFRESH);
+            for (int i = 0; i < framesRun; ++i) {
+                runFrame(cpu, ppu, apu, bus, dotDivider);
+                apu.clearSamples();
+            }
+            if (framesRun == 0) {
+                frameLimiter.sleepUntilNextFrame();
+            }
+        }
+        if (fpsCounter.addFrames(framesRun)) {
+            updateWindowTitle(window.get(), timing.name, showDebugView, debugPaletteId, fpsCounter.getFps());
+        }
 
         SDL_SetRenderDrawColor(renderer.get(), 0, 0, 0, 255);
         SDL_RenderClear(renderer.get());
@@ -337,7 +554,7 @@ int main(int argc, char* argv[]) {
             drawPatternTables(renderer.get(), ppu, patternTextures, debugPaletteId);
             drawPaletteSwatches(renderer.get(), ppu, debugPaletteId);
         } else {
-            // runFrame() stops at the end of the frame, so this is the frame rendered at VBlank start.
+            // runFrame() stops at the end of the frame, so the buffer holds a complete picture.
             drawFrame(renderer.get(), frameTexture.get(), ppu.getFrameBuffer());
         }
         SDL_RenderPresent(renderer.get());

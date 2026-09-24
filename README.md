@@ -41,7 +41,7 @@ Or download the `SDL2-devel-*-VC.zip` from the [SDL releases page](https://githu
 ```sh
 cmake -B build
 cmake --build build
-./build/NesEmulator path/to/game.nes
+./build/NesEmulator path/to/game.nes          # add --pal or --ntsc to force the region
 ```
 
 Press **Esc** or close the window to quit.

@@ -9,6 +9,7 @@
 
 class Cartridge;
 class Ppu2C02;
+class Apu2A03;
 
 // Central CPU bus: routes every CPU memory access to the component that owns the address.
 //
@@ -23,8 +24,11 @@ public:
     void insertCartridge(std::shared_ptr<Cartridge> newCartridge);
     // The PPU is owned elsewhere (it is clocked by the system loop); the bus only routes to it.
     void connectPpu(Ppu2C02& newPpu) { ppu = &newPpu; }
+    // Same for the APU ($4000-$4013, $4015, $4017 writes; $4015 reads).
+    void connectApu(Apu2A03& newApu) { apu = &newApu; }
 
     static constexpr std::uint16_t OAM_DMA = 0x4014;
+    static constexpr std::uint16_t APU_STATUS = 0x4015;
     static constexpr std::uint16_t CONTROLLER_1 = 0x4016; // Write: strobe both pads; read: pad 1
     static constexpr std::uint16_t CONTROLLER_2 = 0x4017; // Read: pad 2 (writes go to the APU frame counter)
     static constexpr int CONTROLLER_COUNT = 2;
@@ -45,6 +49,7 @@ private:
     std::array<std::uint8_t, RAM_SIZE> cpuRam{};
     std::shared_ptr<Cartridge> cartridge;
     Ppu2C02* ppu = nullptr;
+    Apu2A03* apu = nullptr;
     bool oamDmaTriggered = false;
     std::array<Controller, CONTROLLER_COUNT> controllers{};
 
