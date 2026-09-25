@@ -26,6 +26,10 @@ add_executable(NesEmulator
     src/Cartridge.cpp
     src/Controller.cpp
     src/Cpu6502.cpp
+    src/HostInput.cpp
+    src/Mapper.cpp
+    src/Mapper_000.cpp
+    src/Mapper_001.cpp
     src/NoiseChannel.cpp
     src/Ppu2C02.cpp
     src/PulseChannel.cpp
@@ -39,6 +43,11 @@ if(TARGET SDL2::SDL2main)
     target_link_libraries(NesEmulator PRIVATE SDL2::SDL2main)
 endif()
 target_link_libraries(NesEmulator PRIVATE SDL2::SDL2)
+
+# macOS: IOKit reports whether controller input is allowed ("Input Monitoring" permission).
+if(APPLE)
+    target_link_libraries(NesEmulator PRIVATE "-framework IOKit" "-framework CoreFoundation")
+endif()
 
 if(MSVC)
     target_compile_options(NesEmulator PRIVATE /W4 /permissive-)

@@ -1,5 +1,8 @@
 #include "Cartridge.hpp"
 
+#include "Mapper_000.hpp"
+#include "Mapper_001.hpp"
+
 #include <array>
 #include <fstream>
 #include <ios>
@@ -44,13 +47,20 @@ void readExact(std::ifstream& file, void* dest, std::size_t size, const char* wh
 
 } // namespace
 
-std::string_view toString(Mirroring mirroring) {
-    switch (mirroring) {
-    case Mirroring::Horizontal: return "Horizontal";
-    case Mirroring::Vertical: return "Vertical";
-    case Mirroring::FourScreen: return "Four-screen";
+bool Cartridge::isMapperSupported(int mapperId) {
+    return mapperId == 0 || mapperId == 1;
+}
+
+std::string_view Cartridge::mapperName(int mapperId) {
+    switch (mapperId) {
+    case 0: return "NROM";
+    case 1: return "MMC1";
+    case 2: return "UxROM";
+    case 3: return "CNROM";
+    case 4: return "MMC3";
+    case 7: return "AxROM";
+    default: return "unknown";
     }
-    return "Unknown";
 }
 
 Cartridge::Cartridge(const std::filesystem::path& romPath) {
@@ -75,11 +85,11 @@ Cartridge::Cartridge(const std::filesystem::path& romPath) {
     batteryRam = (header.flags6 & FLAG6_BATTERY_RAM) != 0;
 
     if ((header.flags6 & FLAG6_FOUR_SCREEN) != 0) {
-        mirroring = Mirroring::FourScreen;
+        headerMirroring = Mirroring::FourScreen;
     } else if ((header.flags6 & FLAG6_VERTICAL_MIRRORING) != 0) {
-        mirroring = Mirroring::Vertical;
+        headerMirroring = Mirroring::Vertical;
     } else {
-        mirroring = Mirroring::Horizontal;
+        headerMirroring = Mirroring::Horizontal;
     }
 
     // Some old dumps have junk (e.g. "DiskDude!") in bytes 7-15. For plain iNES headers, a
@@ -108,47 +118,69 @@ Cartridge::Cartridge(const std::filesystem::path& romPath) {
     }
 
     prgRom.resize(prgBankCount * PRG_BANK_SIZE);
-    // NROM sees at most 32KB; larger images expose their first 32KB until real mappers exist.
-    prgAddrMask = prgBankCount > 1 ? 0x7FFF : 0x3FFF;
     readExact(file, prgRom.data(), prgRom.size(), "PRG-ROM");
 
     if (chrBankCount > 0) {
-        chrRom.resize(chrBankCount * CHR_BANK_SIZE);
-        readExact(file, chrRom.data(), chrRom.size(), "CHR-ROM");
+        chrMemory.resize(chrBankCount * CHR_BANK_SIZE);
+        readExact(file, chrMemory.data(), chrMemory.size(), "CHR-ROM");
     } else {
         // No CHR-ROM: the board provides 8KB of CHR-RAM instead.
-        chrRom.resize(CHR_BANK_SIZE, 0);
+        chrMemory.resize(CHR_BANK_SIZE, 0);
+    }
+
+    switch (mapperId) {
+    case 0:
+        mapper = std::make_unique<Mapper_000>(prgBankCount, chrBankCount, headerMirroring);
+        break;
+    case 1:
+        mapper = std::make_unique<Mapper_001>(prgBankCount, chrBankCount, headerMirroring);
+        break;
+    default:
+        throw std::runtime_error("Mapper " + std::to_string(mapperId) + " (" + std::string(mapperName(mapperId)) +
+                                 ") is not supported yet (supported: 0 NROM, 1 MMC1)");
     }
 }
 
 bool Cartridge::cpuRead(std::uint16_t addr, std::uint8_t& data) {
     if (addr >= PRG_ROM_START) {
-        data = prgRom[static_cast<std::uint16_t>(addr - PRG_ROM_START) & prgAddrMask];
-        return true;
+        std::uint32_t mapped = 0;
+        if (mapper->cpuMapRead(addr, mapped)) {
+            data = prgRom[mapped];
+            return true;
+        }
+        return false;
     }
-    if (addr >= PRG_RAM_START) {
+    if (addr >= PRG_RAM_START && mapper->isPrgRamEnabled()) {
         data = prgRam[addr - PRG_RAM_START];
         return true;
     }
-    return false;
+    return false; // Disabled PRG-RAM and $4020-$5FFF are open bus
 }
 
-bool Cartridge::cpuWrite(std::uint16_t addr, std::uint8_t data) {
+bool Cartridge::cpuWrite(std::uint16_t addr, std::uint8_t data, std::uint64_t writeStamp) {
     if (addr >= PRG_ROM_START) {
-        return true; // ROM: NROM has no mapper registers, so the write is swallowed.
+        mapper->setCpuWriteStamp(writeStamp);
+        std::uint32_t mapped = 0;
+        if (mapper->cpuMapWrite(addr, mapped, data)) {
+            prgRom[mapped] = data; // Only for boards with writable memory in this range
+        }
+        return true;
     }
     if (addr >= PRG_RAM_START) {
-        prgRam[addr - PRG_RAM_START] = data;
+        if (mapper->isPrgRamEnabled()) {
+            prgRam[addr - PRG_RAM_START] = data;
+        }
         return true;
     }
     return false;
 }
 
 bool Cartridge::ppuRead(std::uint16_t addr, std::uint8_t& data) {
-    if (addr > CHR_END) {
+    std::uint32_t mapped = 0;
+    if (!mapper->ppuMapRead(addr, mapped)) {
         return false;
     }
-    data = chrRom[addr];
+    data = chrMemory[mapped];
     return true;
 }
 
@@ -156,8 +188,9 @@ bool Cartridge::ppuWrite(std::uint16_t addr, std::uint8_t data) {
     if (addr > CHR_END) {
         return false;
     }
-    if (usesChrRam()) {
-        chrRom[addr] = data;
+    std::uint32_t mapped = 0;
+    if (mapper->ppuMapWrite(addr, mapped)) {
+        chrMemory[mapped] = data;
     }
-    return true;
+    return true; // CHR-ROM writes are swallowed
 }

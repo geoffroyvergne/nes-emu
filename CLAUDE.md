@@ -11,7 +11,7 @@ An accurate, modular Nintendo Entertainment System (NES) emulator written from s
 ## Build & Run Commands
 - **Configure CMake:** `cmake -B build`
 - **Build Project:** `cmake --build build`
-- **Run Emulator:** `./build/NesEmulator [--pal | --ntsc] path/to/game.nes` (region: flag > ROM header > file name like "(E)"/"(Europe)" > NTSC; the chosen region and its source are printed at startup)
+- **Run Emulator:** `./build/NesEmulator [--pal | --ntsc] path/to/game.nes` (region: flag > ROM header > file name like "(E)"/"(Europe)" > NTSC; the chosen region and its source are printed at startup); `--input-debug` prints the NES buttons each player holds whenever they change
 - **CPU trace (nestest):** `./build/NesEmulator --test-mode nestest.nes` → writes `emulator_execution.log`; compare with `nestest.log` after stripping its PPU column: `sed -E 's/ PPU:[ 0-9]{3},[ 0-9]{3}//' nestest.log`
 - **Clean Build:** `rm -rf build`
 
@@ -27,6 +27,7 @@ An accurate, modular Nintendo Entertainment System (NES) emulator written from s
 - **Architecture rules:**
   - Modern C++ practices (RAII, smart pointers, strict typing with `<cstdint>`).
   - Decoupled components: Bus, CPU, PPU, APU, and Cartridge must interact via a centralized Bus system.
+  - Cartridge boards are `Mapper` subclasses (`Mapper_NNN`, one per iNES mapper id): they only translate addresses and hold board registers; `Cartridge` owns PRG/CHR/PRG-RAM memory and instantiates the mapper in a `switch (mapperId)`.
   - No global state.
 
 ## Current Roadmap
@@ -50,11 +51,12 @@ An accurate, modular Nintendo Entertainment System (NES) emulator written from s
   - [x] Step 4.5: 8x8 sprites (`ObjectAttributeEntry` view of OAM, 8 per scanline, OAM-order priority, behind-background bit, H/V flip, transparency, PPUMASK enable/left clip) composited over the background; OAM DMA via $4014 with 513/514-cycle CPU stall
   - [ ] Step 4.5b: Sprite flags and sizes
     - [x] Sprite 0 hit (detected while drawing each scanline against the scrolled background, raised at dot x+1, cleared at pre-render dot 1)
-    - [ ] 8x16 sprites, sprite overflow flag
+    - [x] 8x16 sprites (PPUCTRL bit 5: table from tile bit 0, top/bottom tiles id&$FE / +1, vertical flip over 16 rows)
+    - [ ] Sprite overflow flag
   - [x] Step 4.6: Scanline renderer driven by loopy v/t/x: each line drawn at dot 1 from v + fine X; fine/coarse Y increment at dot 256, horizontal t->v copy at 257, vertical t->v copy at pre-render 280-304, odd-frame skipped dot. Mid-frame $2005/$2006 splits take effect on the next line
   - [ ] Step 4.7: Dot-accurate fetch pipeline (mid-scanline effects, $2007 access during rendering, MMC3 A12 IRQ timing)
 - [ ] Step 5: Implement Input (Controllers) and APU (Audio) (Current)
-  - [x] Step 5.1: `Controller` shift registers on $4016/$4017 (strobe reload, A,B,Select,Start,Up,Down,Left,Right order, 1s after 8 reads, open-bus bit 6), keyboard for player 1: Z=A, X=B, Space=Select, Enter=Start, arrows
+  - [x] Step 5.1: `Controller` shift registers on $4016/$4017 (strobe reload, A,B,Select,Start,Up,Down,Left,Right order, 1s after 8 reads, open-bus bit 6), host input in `HostInput` (`KeyboardPad` + `GamepadManager`): player 1 = keyboard (Z=A, X=B, Right Shift/A=Select, Enter=Start, arrows) + first SDL game controller, player 2 = second controller; pad buttons by position (bottom face = A, right/left face = B, +/Start, -/Select, D-pad + left stick), hot-plug; SDL's default drivers (override with env vars such as SDL_JOYSTICK_HIDAPI=0); opposite D-pad directions cancel out
   - [ ] Step 5.2: APU (Current)
     - [x] `Apu2A03` + reusable `PulseChannel` (duty, envelope, sweep, length counter), Pulse 1 on $4000-$4003, $4015 enable/status, frame counter (4/5-step, ~240 Hz quarter frames), nonlinear pulse mixer, 44.1 kHz resampling + 90 Hz high-pass, SDL audio queue with audio-paced main loop (~50 ms queue)
     - [x] Pulse 2 ($4004-$4007: second `PulseChannel`, two's-complement sweep negate)
@@ -63,3 +65,7 @@ An accurate, modular Nintendo Entertainment System (NES) emulator written from s
     - [x] NTSC/PAL regions: `Region.hpp` holds every region-dependent constant (CPU clock, PPU dots per CPU cycle 3 vs 3.2, 262 vs 312 scanlines, odd-frame skip, APU frame counter steps, noise periods); detected from NES 2.0 byte 12 / iNES byte 9 / file name, overridable with --pal/--ntsc
     - [ ] DMC ($4010-$4013: delta-modulated samples read from PRG via the bus, CPU stall cycles)
     - [ ] CPU IRQ line: frame counter IRQ (and DMC IRQ, mapper IRQs)
+- [ ] Step 6: Mappers (Current)
+  - [x] `Mapper` base class (cpuMapRead/Write, ppuMapRead/Write, runtime mirroring, PRG-RAM enable); `Mapper_000` (NROM); `Mapper_001` (MMC1: 5-bit serial shift register with bit-7 reset, consecutive-cycle write ignore for RMW instructions, PRG modes 0-3, 4KB/8KB CHR, 4 mirroring modes incl. single-screen, PRG-RAM enable, SUROM 512KB); unsupported mappers fail at load with a clear error
+  - [ ] Battery-backed PRG-RAM saved to a `.sav` file next to the ROM (Zelda, Final Fantasy, ...)
+  - [ ] Mapper 2 (UxROM), 3 (CNROM), 7 (AxROM), 4 (MMC3 + scanline IRQ, needs the CPU IRQ line)

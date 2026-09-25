@@ -419,3 +419,189 @@ Implement the Sprite 0 Hit detection according to our `CLAUDE.md` guidelines:
    - Review how the fine scroll offsets from `t` and `fineX` are applied during pixel generation to ensure that once the Sprite 0 Hit is triggered and the game writes new scroll values, the layout updates correctly.
 
 Implement this scanline pixel overlap logic so the game can break out of its status bar loop and start scrolling dynamically.
+
+# Prompt Step 7: APU initialization and the Pulse 1 channel
+
+The emulator is now visually perfect and scrolls flawlessly! Let's move to Step 5 of our roadmap: Implementing the Audio Processing Unit (APU) foundations and the first Pulse (Square Wave) channel.
+
+We will use SDL2 Audio Queue functions (`SDL_QueueAudio`) to stream raw audio samples smoothly from our emulation loop to the host system's speakers. The APU registers are mapped to CPU addresses 0x4000 to 0x4015.
+
+Implement the following architecture according to our `CLAUDE.md` guidelines:
+
+1. Create `include/Apu2A03.hpp` and `src/Apu2A03.cpp`:
+   - Create an `Apu2A03` class.
+   - Implement the register mapping for **Pulse 1** (CPU addresses 0x4000 to 0x4003):
+     * `0x4000`: Duty cycle (12.5%, 25%, 50%, 75%), volume, and envelope flags.
+     * `0x4001`: Sweep unit controls (for sliding pitches).
+     * `0x4002`: Timer low byte (controls frequency/pitch).
+     * `0x4003`: Timer high byte and Length Counter (controls duration).
+   - Implement a Frame Counter structure that ticks at ~240Hz to clock the APU envelopes and length counters.
+   - Implement a digital synthesizer function inside the `clock()` method that generates a square wave sample based on the active duty cycle and timer frequency.
+   - Maintain an internal audio sample buffer.
+
+2. Integrate SDL2 Audio in `src/main.cpp`:
+   - Initialize the SDL Audio device using `SDL_OpenAudioDevice` with a standard sample rate (e.g., 44100 Hz, 1 byte or 1 float per sample, mono or stereo).
+   - In the main emulator execution loop, for every CPU cycle, tick the APU.
+   - Downsample or collect the APU audio output, and when the buffer accumulates enough samples, push them to the device using `SDL_QueueAudio`. Ensure the audio queue size is monitored to prevent latency or buffer starvation.
+
+3. Connect APU to the Bus:
+   - Update `include/Bus.hpp` and `src/Bus.cpp` to route memory writes from `0x4000` to `0x4013` and `0x4015` (APU Status) into the `Apu2A03` instance.
+
+4. Update `CMakeLists.txt` and `CLAUDE.md`.
+
+Generate clean C++20 code. Focus on clean register isolation for the Pulse 1 channel so we can easily copy this structure for the Pulse 2 channel in the next sub-step.
+
+# Prompt Step 7.2: Pulse 2, Triangle, Noise and Mixer
+
+The audio framework is running smoothly without slowing down the emulator, but the music sounds incomplete or wrong because we are only playing the Pulse 1 channel. To get the authentic NES sound, we need to implement the remaining core audio channels and mix them together.
+
+Implement the remaining audio channels inside `include/Apu2A03.hpp` and `src/Apu2A03.cpp` according to our `CLAUDE.md` guidelines:
+
+1. **Pulse 2 Channel (CPU 0x4004 - 0x4007):**
+   - Duplicate the Pulse 1 square-wave logic for Pulse 2, mapping it to its own set of registers. Note that Pulse 2 uses a slightly different sweep behavior (negative sweep bit shifts differently than Pulse 1), so ensure the sweep subtraction logic accounts for this NES hardware quirk.
+
+2. **Triangle Channel (CPU 0x4008, 0x400A, 0x400B):**
+   - Implement the Triangle wave channel used for basslines.
+   - Unlike the Pulse channels, the Triangle channel does not have a volume control wrapper; its volume is controlled by stepping through a static 32-step triangle waveform sequence.
+   - Implement its Linear Counter and Length Counter to control its duration and silencing.
+
+3. **Noise Channel (CPU 0x400C, 0x400E, 0x400F):**
+   - Implement the Noise channel used for percussion, drums, and explosions.
+   - It requires a Pseudo-Random Number Generator using a 15-bit Linear Feedback Shift Register (LFSR). On every clock tick, shift the LFSR and use bit 0 to output either a 0 or a volume sample (white noise).
+   - Implement its timer table lookup to map the 4-bit frequency index to the official NES period cycle values.
+
+4. **Audio Mixing (The Mixer):**
+   - Implement a simple linear or official non-linear APU mixer to combine the output of all active channels into a single output audio sample:
+     `output = pulse_output + triangle_noise_output`
+     * `pulse_output = 95.88 / ((8128 / (pulse1 + pulse2)) + 100)`
+     * `triangle_noise_output = 159.79 / ((1 / ((triangle / 8227) + (noise / 12241))) + 100)`
+   - (An approximated weighted linear mix is also acceptable if it keeps performance optimal).
+
+5. Update `CLAUDE.md` roadmap to reflect APU completion.
+
+generate clean C++20 code. Once done, all standard game melodies, bass tracks, and coin/jump sound effects should blend perfectly.
+
+# Prompt Sound too fast
+
+The audio quality and channels are mixed correctly, but the sound plays way too fast compared to the gameplay. This is a synchronization and timing issue between the CPU/APU clock and the SDL2 audio device queue.
+
+Analyze `src/main.cpp` and `src/Apu2A03.cpp` to implement a strict frame rate limiter and correct the audio sampling rate:
+
+1. **Implement Video/Frame Rate Limiting in `src/main.cpp`:**
+   - The NES NTSC standard runs at exactly **60.098 frames per second** (roughly 16.63 milliseconds per frame).
+   - Ensure that our main execution loop is throttled. If we are using `SDL_RENDERER_PRESENTVSYNC` in our SDL Renderer, ensure the CPU loop naturally waits for the monitor's refresh rate. 
+   - If V-Sync is not enough or disabled, implement a precise time-delta sleep mechanism using `<chrono>` to ensure a full frame (29780.5 CPU cycles) takes exactly ~16.6 milliseconds to execute.
+
+2. **Fix the Audio Downsampling Ratio in `src/Apu2A03.cpp`:**
+   - The NES CPU clock runs at **1,789,773 Hz**. If our SDL Audio device is opened at **44,100 Hz**, we need to collect and average samples accurately.
+   - The exact cycle ratio is `1789773 / 44100 = ~40.58`. This means the APU should push exactly **1 sample to SDL2 every 40.58 CPU cycles**.
+   - Review the sample accumulation buffer logic. Ensure we are not overloading `SDL_QueueAudio` and that the audio queue doesn't grow indefinitely (if the queue is too large, drop samples or dynamically adjust).
+
+Generate the updated synchronization and downsampling code so that the audio pitch and speed match the original speed of the game perfectly.
+
+# Prompt PAL / NRSC
+
+The audio and gameplay are still running too fast. Your intuition is correct: we need to properly handle PAL vs NTSC regions, as the clock rates, frame targets, and audio downsampling ratios differ significantly between them.
+
+Update the architecture to support dynamic region switching (NTSC by default, PAL if detected or toggled) according to our `CLAUDE.md` guidelines:
+
+1. **Update `Cartridge` or `Bus` to detect Region:**
+   - Look at the iNES header (Byte 9 contains TV system flags in iNES format, and flags 12 in iNES 2.0). If it indicates a PAL ROM, set a `bool isPal = true;` flag in the system. Alternatively, allow a command-line flag like `--pal` to force PAL mode.
+
+2. **Make System Constants Dynamic:**
+   - Instead of hardcoded values, update `src/main.cpp`, `src/Cpu6502.cpp`, and `src/Apu2A03.cpp` to use variables based on the active region:
+     * **If NTSC:** CPU clock = 1789773 Hz, Frame rate = 60.098 Hz, Cycles per frame = 29780.5, Audio Ratio = 1789773 / 44100 (~40.58).
+     * **If PAL:** CPU clock = 1662607 Hz, Frame rate = 50.007 Hz, Cycles per frame = 33247.6, Audio Ratio = 1662607 / 44100 (~37.70).
+
+3. **Implement an Audio-Driven Sync Loop (Audio Throttling) in `src/main.cpp`:**
+   - Video-based sleeping (like V-Sync) can fail if your modern monitor runs at 144Hz or 120Hz instead of 60Hz/50Hz.
+   - The absolute best way to sync an emulator is **Audio Throttling**: Inside the main loop, check the size of the SDL audio queue using `SDL_GetQueuedAudioSize`. 
+   - If the audio queue contains too many samples (e.g., more than ~2048 samples or about 46ms of audio), make the main loop sleep for 1 or 2 milliseconds (`std::this_thread::sleep_for`) before executing the next CPU/PPU cycles. This forces the emulator to naturally adapt to the exact playback speed of your sound card.
+
+Refactor the timing and audio downsampling configuration to support this flexible architecture.
+
+# Prompt Mapper MMC1 for bigger games
+
+Some complex games are still getting stuck on a green screen. After checking the logs, these games use Mapper 1 (MMC1) instead of Mapper 0 (NROM). We need to refactor our Cartridge architecture to support dynamic Mappers and implement the MMC1 protocol.
+
+Update the architecture according to our `CLAUDE.md` guidelines:
+
+1. **Create a Base Mapper Class:**
+   - Create `include/Mapper.hpp` and `src/Mapper.cpp` defining an abstract base class `Mapper`.
+   - It must provide pure virtual methods:
+     * `bool cpuMapRead(uint16_t addr, uint32_t& mappedAddr);`
+     * `bool cpuMapWrite(uint16_t addr, uint32_t& mappedAddr, uint8_t data);`
+     * `bool ppuMapRead(uint16_t addr, uint32_t& mappedAddr);`
+     * `bool ppuMapWrite(uint16_t addr, uint32_t& mappedAddr);`
+
+2. **Implement Mapper 0 (NROM) into the new structure:**
+   - Create `Mapper_000` inheriting from `Mapper` and move our current hardcoded NROM mapping logic into it.
+
+3. **Implement Mapper 1 (MMC1) Structure (`Mapper_001`):**
+   - Create a class `Mapper_001` that handles MMC1 bank-switching logic.
+   - Implement the internal 5-bit shift register mechanics unique to MMC1:
+     * Writes to `0x8000-0xFFFF` do not write data directly; they interact with a shift register. If bit 7 of the written data is 1, reset the shift register. Otherwise, shift the data in. On the 5th write, update the internal control registers based on the target address bits 13 and 14:
+       - Control Register (`0x8000-0x9FFF`): Sets mirroring (Horizontal, Vertical, Single-Screen) and PRG/CHR bank switching modes.
+       - CHR Bank 0 & 1 Registers (`0xA000-0xDFFF`): Switches 4KB or 8KB graphic banks.
+       - PRG Bank Register (`0xE000-0xFFFF`): Switches 16KB code banks dynamically.
+
+4. **Update `Cartridge`:**
+   - When loading the ROM, use a `switch(mapperID)` statement to instantiate the correct Mapper subclass (`std::unique_ptr<Mapper>`).
+   - Route all `cpuRead/Write` and `ppuRead/Write` address translations through the active mapper object before accessing the raw PRG/CHR vectors.
+
+5. Update `CMakeLists.txt` and `CLAUDE.md`.
+
+Generate clean C++20 code. Ensure the shift register reset rules are precise, as games like The Legend of Zelda heavily rely on exact MMC1 behavior to load text and maps.
+
+# Prompt Joypad
+
+The emulator is fully synchronized, the graphics scroll flawlessly, and the sound is perfect! The very last piece of the puzzle is to bind our actual host keyboard keys to the `controllerState[0]` byte inside `src/main.cpp`.
+
+Update the SDL input polling logic in `src/main.cpp` using these exact specifications:
+
+1. **Define the Key Mapping:**
+   Let's use a standard, intuitive keyboard setup for Player 1:
+   - **Z** key maps to **Button A** (Bit 0)
+   - **X** key maps to **Button B** (Bit 1)
+   - **Right Shift** or **A** key maps to **Select** (Bit 2)
+   - **Enter** key maps to **Start** (Bit 3)
+   - **Up Arrow** maps to **Up** (Bit 4)
+   - **Down Arrow** maps to **Down** (Bit 5)
+   - **Left Arrow** maps to **Left** (Bit 6)
+   - **Right Arrow** maps to **Right** (Bit 7)
+
+2. **Handle SDL Events (`SDL_KEYDOWN` and `SDL_KEYUP`):**
+   - When a key is **pressed** (`SDL_KEYDOWN`), perform a bitwise OR (`|=`) to set that specific button's bit to 1 inside `controllerState[0]`.
+   - When a key is **released** (`SDL_KEYUP`), perform a bitwise AND with a bitwise NOT (`&= ~`) to clear that button's bit back to 0 inside `controllerState[0]`.
+
+3. **Prevent Impossible D-Pad Combos (Anti-glitch hardware rule):**
+   - If both Up and Down are pressed simultaneously, clear both or prioritize one.
+   - If both Left and Right are pressed simultaneously, clear both. (Simultaneous left+right presses can cause memory corruption glitches in games like Super Mario Bros).
+
+Generate the input mapping code in `src/main.cpp` so we can finally play the games!
+
+# Prompt game controller issur : 
+
+The emulator console prints "Controller connected: Nintendo Switch Pro Controller (player 1)", which means macOS permissions are fine and SDL2 detects the hardware. However, the game does not react to any button presses. This is because our `src/main.cpp` is likely only listening to keyboard events and hasn't initialized or bound the `SDL_GameController` events.
+
+Update `src/main.cpp` to add native Game Controller support alongside our keyboard mapping according to our `CLAUDE.md` guidelines:
+
+1. **Initialize and Open the Controller:**
+   - In the initialization section (or when handling `SDL_CONTROLLERDEVICEADDED`), explicitly open the controller using `SDL_GameControllerOpen(device_index)` and store the `SDL_GameController*` pointer globally or inside your window/input context.
+   - Properly close it with `SDL_GameControllerClose` on `SDL_CONTROLLERDEVICEREMOVED` or when exiting the application to prevent memory leaks.
+
+2. **Handle Controller Button Events:**
+   - In the `SDL_PollEvent` loop, add cases for `SDL_CONTROLLERBUTTONDOWN` and `SDL_CONTROLLERBUTTONUP`.
+   - Map the Pro Controller buttons directly to our 8-bit `controllerState[0]` registry using bitwise operations (`|=` to press, `&= ~` to release):
+     * `SDL_CONTROLLER_BUTTON_B` (Physical bottom button) -> NES **Button A** (Bit 0)
+     * `SDL_CONTROLLER_BUTTON_A` (Physical right button) or `SDL_CONTROLLER_BUTTON_Y` (Physical left button) -> NES **Button B** (Bit 1)
+     * `SDL_CONTROLLER_BUTTON_BACK` (Minus button) -> NES **Select** (Bit 2)
+     * `SDL_CONTROLLER_BUTTON_START` (Plus button) -> NES **Start** (Bit 3)
+     * `SDL_CONTROLLER_BUTTON_DPAD_UP` -> NES **Up** (Bit 4)
+     * `SDL_CONTROLLER_BUTTON_DPAD_DOWN` -> NES **Down** (Bit 5)
+     * `SDL_CONTROLLER_BUTTON_DPAD_LEFT` -> NES **Left** (Bit 6)
+     * `SDL_CONTROLLER_BUTTON_DPAD_RIGHT` -> NES **Right** (Bit 7)
+
+3. **Keep Coexistence:** Ensure that BOTH the keyboard and the gamepad can modify `controllerState[0]` simultaneously so the user can switch between them seamlessly.
+
+Refactor the input loop in `src/main.cpp` to implement this controller binding architecture.

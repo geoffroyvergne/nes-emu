@@ -244,6 +244,12 @@ std::uint16_t Ppu2C02::mirrorNametable(std::uint16_t addr) const {
     case Mirroring::Horizontal:
         physicalTable = table >> 1; // $2000=$2400, $2800=$2C00
         break;
+    case Mirroring::SingleScreenLower:
+        physicalTable = 0;
+        break;
+    case Mirroring::SingleScreenUpper:
+        physicalTable = 1;
+        break;
     case Mirroring::FourScreen:
         // TODO: four-screen boards add 2KB of VRAM on the cartridge; fall back to vertical until then.
         physicalTable = table & 0x01;
@@ -398,8 +404,10 @@ int Ppu2C02::renderScanline(std::span<std::uint32_t, SCREEN_WIDTH> line, int y, 
     if ((mask & MASK_SHOW_SPRITES) == 0) {
         return -1;
     }
-    // TODO: 8x16 sprites (PPUCTRL bit 5) and the sprite overflow flag.
-    const int patternTable = (ctrl & CTRL_SPRITE_TABLE) != 0 ? 1 : 0;
+    // TODO: the sprite overflow flag.
+    const int patternTable = (ctrl & CTRL_SPRITE_TABLE) != 0 ? 1 : 0; // 8x8 mode only
+    const bool tallSprites = (ctrl & CTRL_SPRITE_SIZE_16) != 0;         // PPUCTRL bit 5: 8x16 sprites
+    const int spriteHeight = tallSprites ? 2 * TILE_SIZE : TILE_SIZE;
     const int firstVisibleX = (mask & MASK_SHOW_SPRITES_LEFT) != 0 ? 0 : TILE_SIZE;
 
     // Evaluation: the first 8 sprites in OAM order that cover this scanline.
@@ -407,7 +415,7 @@ int Ppu2C02::renderScanline(std::span<std::uint32_t, SCREEN_WIDTH> line, int y, 
     std::size_t lineSpriteCount = 0;
     for (int i = 0; i < SPRITE_COUNT && lineSpriteCount < lineSprites.size(); ++i) {
         const int row = y - (oamMemory[static_cast<std::size_t>(i) * 4] + 1);
-        if (row >= 0 && row < TILE_SIZE) {
+        if (row >= 0 && row < spriteHeight) {
             lineSprites[lineSpriteCount++] = static_cast<std::uint8_t>(i);
         }
     }
@@ -420,9 +428,9 @@ int Ppu2C02::renderScanline(std::span<std::uint32_t, SCREEN_WIDTH> line, int y, 
         const ObjectAttributeEntry sprite = getOamEntry(lineSprites[n]);
         int row = y - (sprite.y + 1);
         if ((sprite.attribute & SPRITE_FLIP_VERTICAL) != 0) {
-            row = TILE_SIZE - 1 - row;
+            row = spriteHeight - 1 - row; // Flips the whole sprite: in 8x16 mode the two tiles swap
         }
-        const std::uint16_t addr = patternRowAddress(patternTable, sprite.id, row);
+        const std::uint16_t addr = spriteRowAddress(tallSprites, patternTable, sprite.id, row);
         const TileRow pixels = decodeTileRow(ppuRead(addr), ppuRead(static_cast<std::uint16_t>(addr + TILE_SIZE)));
 
         const bool flipH = (sprite.attribute & SPRITE_FLIP_HORIZONTAL) != 0;

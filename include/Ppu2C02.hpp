@@ -123,6 +123,18 @@ public:
         return static_cast<std::uint16_t>((tableIndex & 1) * PATTERN_TABLE_BYTES + tileIndex * TILE_BYTES + row);
     }
 
+    // Pattern address of one row of a sprite (row counted from the top of the sprite, after any
+    // vertical flip; 0-7 for 8x8, 0-15 for 8x16):
+    //   8x8   tile = id, from the sprite table selected by PPUCTRL bit 3
+    //   8x16  table = id bit 0 (PPUCTRL bit 3 is ignored); top half = tile id & $FE, bottom = the next tile
+    [[nodiscard]] static constexpr std::uint16_t spriteRowAddress(bool tallSprites, int spriteTable, std::uint8_t id, int row) {
+        if (!tallSprites) {
+            return patternRowAddress(spriteTable, id, row);
+        }
+        const auto tile = static_cast<std::uint8_t>((id & 0xFE) + (row >= TILE_SIZE ? 1 : 0));
+        return patternRowAddress(id & 0x01, tile, row & (TILE_SIZE - 1));
+    }
+
     // Combines one row's two bit planes into 8 color indexes. Bit 7 is the leftmost pixel:
     //   lowPlane  = 0b0110'0001, highPlane = 0b0011'0001  ->  0 1 3 2 0 0 0 3
     [[nodiscard]] static constexpr TileRow decodeTileRow(std::uint8_t lowPlane, std::uint8_t highPlane) {

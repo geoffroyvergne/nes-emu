@@ -33,7 +33,9 @@ public:
     static constexpr std::uint16_t CONTROLLER_2 = 0x4017; // Read: pad 2 (writes go to the APU frame counter)
     static constexpr int CONTROLLER_COUNT = 2;
 
-    void cpuWrite(std::uint16_t addr, std::uint8_t data);
+    // consecutiveCycle: this write happens on the CPU cycle right after the previous write (the
+    // second write of a read-modify-write instruction). Some mappers (MMC1) ignore such writes.
+    void cpuWrite(std::uint16_t addr, std::uint8_t data, bool consecutiveCycle = false);
     // readOnly = true is for debuggers/disassemblers: the read must not trigger side effects
     // (e.g. clearing the PPU status flag when reading $2002).
     [[nodiscard]] std::uint8_t cpuRead(std::uint16_t addr, bool readOnly = false);
@@ -51,6 +53,7 @@ private:
     Ppu2C02* ppu = nullptr;
     Apu2A03* apu = nullptr;
     bool oamDmaTriggered = false;
+    std::uint64_t writeStamp = 0; // Same value for writes on consecutive CPU cycles
     std::array<Controller, CONTROLLER_COUNT> controllers{};
 
     void runOamDma(std::uint8_t page);

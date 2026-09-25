@@ -44,4 +44,20 @@ cmake --build build
 ./build/NesEmulator path/to/game.nes          # add --pal or --ntsc to force the region
 ```
 
-Press **Esc** or close the window to quit.
+### Controls (player 1)
+
+| NES | Keyboard | Game controller (Switch Pro, Xbox, PlayStation, 8BitDo...) |
+|---|---|---|
+| A | Z | Bottom face button (Pro Controller: B) |
+| B | X | Right or left face button (Pro Controller: A or Y) |
+| Select | Right Shift or A | − / Back / Share |
+| Start | Enter | + / Start / Options |
+| D-pad | Arrow keys | D-pad or left stick |
+
+The first controller connected is player 1 (together with the keyboard), the second is player 2.
+
+**macOS:** controller input needs the *Input Monitoring* permission for the app you launch the emulator from (Terminal, iTerm, Visual Studio Code...): System Settings > Privacy & Security > Input Monitoring, enable it, then quit and reopen that app. Without it the controller is detected but its buttons never arrive (the emulator prints a warning).
+
+If a controller doesn't seem to respond, run with `--input-debug`: every raw controller event SDL receives and every change in the buttons the NES sees is printed in the terminal.
+
+Tab toggles the pattern-table debug view (P cycles palettes there). Press **Esc** or close the window to quit.

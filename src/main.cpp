@@ -3,6 +3,7 @@
 #include "Cartridge.hpp"
 #include "Controller.hpp"
 #include "Cpu6502.hpp"
+#include "HostInput.hpp"
 #include "Ppu2C02.hpp"
 #include "Region.hpp"
 
@@ -122,7 +123,7 @@ void printCartridgeInfo(const Cartridge& cartridge) {
               << "CHR-ROM:   " << +cartridge.getChrBankCount() << " x 8KB ("
               << cartridge.getChrBankCount() * Cartridge::CHR_BANK_SIZE / 1024 << " KB)"
               << (cartridge.usesChrRam() ? " -> uses 8KB CHR-RAM" : "") << '\n'
-              << "Mapper:    " << +cartridge.getMapperId() << '\n'
+              << "Mapper:    " << +cartridge.getMapperId() << " (" << Cartridge::mapperName(cartridge.getMapperId()) << ")\n"
               << "Mirroring: " << toString(cartridge.getMirroring()) << '\n'
               << "Trainer:   " << (cartridge.hasTrainer() ? "yes" : "no") << '\n'
               << "Battery:   " << (cartridge.hasBatteryRam() ? "yes" : "no") << std::endl;
@@ -289,22 +290,6 @@ void drawFrame(SDL_Renderer* renderer, SDL_Texture* texture, const Ppu2C02::Fram
     SDL_RenderCopy(renderer, texture, nullptr, nullptr);
 }
 
-// Keyboard layout for player 1. Returns false for keys that aren't mapped to a button.
-bool mapKeyToButton(SDL_Keycode key, Controller::Button& button) {
-    switch (key) {
-    case SDLK_z: button = Controller::A; return true;
-    case SDLK_x: button = Controller::B; return true;
-    case SDLK_SPACE: button = Controller::SELECT; return true;
-    case SDLK_RETURN:
-    case SDLK_KP_ENTER: button = Controller::START; return true;
-    case SDLK_UP: button = Controller::UP; return true;
-    case SDLK_DOWN: button = Controller::DOWN; return true;
-    case SDLK_LEFT: button = Controller::LEFT; return true;
-    case SDLK_RIGHT: button = Controller::RIGHT; return true;
-    default: return false;
-    }
-}
-
 // Audio queue target (latency). The queue settles near it, offset by the small error the rate
 // control needs to produce its correction, and must absorb 11.6 ms device chunks plus a frame.
 constexpr int AUDIO_QUEUE_TARGET_MS = 50;
@@ -413,6 +398,19 @@ std::optional<Region> regionFromFileName(const std::filesystem::path& path) {
     return std::nullopt;
 }
 
+// "A START RIGHT", or "-" when nothing is held (for --input-debug).
+std::string describeButtons(std::uint8_t buttons) {
+    static constexpr std::array<std::string_view, 8> NAMES = {"A", "B", "SELECT", "START", "UP", "DOWN", "LEFT", "RIGHT"};
+    std::string text;
+    for (std::size_t bit = 0; bit < NAMES.size(); ++bit) {
+        if ((buttons & (1u << bit)) != 0) {
+            text += text.empty() ? "" : " ";
+            text += NAMES[bit];
+        }
+    }
+    return text.empty() ? "-" : text;
+}
+
 // Picks the console region: command line > ROM header > file name > NTSC. Returns it with its source.
 std::pair<Region, std::string_view> resolveRegion(std::optional<Region> forced, const Cartridge& cartridge,
                                                   const std::filesystem::path& romPath) {
@@ -432,12 +430,15 @@ std::pair<Region, std::string_view> resolveRegion(std::optional<Region> forced, 
 
 int main(int argc, char* argv[]) {
     bool testMode = false;
+    bool inputDebug = false;
     std::optional<Region> forcedRegion;
     const char* romPath = nullptr;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
         if (arg == "--test-mode") {
             testMode = true;
+        } else if (arg == "--input-debug") {
+            inputDebug = true;
         } else if (arg == "--pal") {
             forcedRegion = Region::Pal;
         } else if (arg == "--ntsc") {
@@ -450,7 +451,8 @@ int main(int argc, char* argv[]) {
         }
     }
     if (romPath == nullptr) {
-        std::cerr << "Usage: " << argv[0] << " [--pal | --ntsc] [--test-mode] <path/to/game.nes>\n"
+        std::cerr << "Usage: " << argv[0] << " [--pal | --ntsc] [--input-debug] [--test-mode] <path/to/game.nes>\n"
+                  << "  --input-debug print the NES buttons each player holds whenever they change\n"
                   << "  --pal/--ntsc  force the console region (default: ROM header, then file name, then NTSC)\n"
                   << "  --test-mode   run the CPU headless from $C000 (nestest.nes) and write "
                   << TRACE_LOG_PATH << '\n';
@@ -470,10 +472,6 @@ int main(int argc, char* argv[]) {
     std::cout << std::format("Region:    {} (from {}): CPU {} Hz, {:.4f} fps, {} CPU cycles/frame", timing.name,
                              regionSource, timing.cpuClockHz, timing.frameRate(), timing.cpuCyclesPerFrame())
               << std::endl;
-    if (cartridge->getMapperId() != 0) {
-        std::cerr << "Warning: mapper " << +cartridge->getMapperId()
-                  << " is not supported yet; using mapper 0 (NROM) layout\n";
-    }
 
     // Declared before the bus, which keeps a non-owning pointer to it.
     Ppu2C02 ppu;
@@ -551,6 +549,8 @@ int main(int argc, char* argv[]) {
     FrameLimiter frameLimiter(timing.frameRate());
     PresentScheduler presentScheduler;
     FpsCounter fpsCounter;
+    KeyboardPad keyboardPad;
+    GamepadManager gamepads;
     bool showDebugView = false;
     std::uint8_t debugPaletteId = 0;
     updateWindowTitle(window.get(), timing.name, showDebugView, debugPaletteId, fpsCounter.getFps());
@@ -563,12 +563,29 @@ int main(int argc, char* argv[]) {
             case SDL_QUIT:
                 isRunning = false;
                 break;
+            case SDL_CONTROLLERDEVICEADDED:
+            case SDL_CONTROLLERDEVICEREMOVED:
+                gamepads.handleEvent(event);
+                break;
+            case SDL_CONTROLLERBUTTONDOWN:
+            case SDL_CONTROLLERBUTTONUP:
+                // Raw events, before any NES mapping: tells "SDL gets nothing" from "mapping is wrong".
+                if (inputDebug) {
+                    std::cout << "SDL: controller button '"
+                              << SDL_GameControllerGetStringForButton(static_cast<SDL_GameControllerButton>(event.cbutton.button))
+                              << (event.type == SDL_CONTROLLERBUTTONDOWN ? "' down" : "' up") << std::endl;
+                }
+                break;
+            case SDL_CONTROLLERAXISMOTION:
+                if (inputDebug && (event.caxis.value > 16000 || event.caxis.value < -16000)) {
+                    std::cout << "SDL: controller axis '"
+                              << SDL_GameControllerGetStringForAxis(static_cast<SDL_GameControllerAxis>(event.caxis.axis))
+                              << "' = " << event.caxis.value << std::endl;
+                }
+                break;
             case SDL_KEYDOWN:
             case SDL_KEYUP: {
-                Controller::Button button{};
-                if (mapKeyToButton(event.key.keysym.sym, button)) {
-                    // Level-triggered: key repeat just re-sets the same bit.
-                    bus.getController(0).setButton(button, event.type == SDL_KEYDOWN);
+                if (keyboardPad.handleKey(event.key.keysym.sym, event.type == SDL_KEYDOWN)) {
                     break;
                 }
                 if (event.type == SDL_KEYUP) {
@@ -588,12 +605,25 @@ int main(int argc, char* argv[]) {
             case SDL_WINDOWEVENT:
                 // Key-up events are lost while the window is unfocused; release everything.
                 if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
-                    bus.getController(0).setState(0x00);
+                    keyboardPad.releaseAll();
                 }
                 break;
             default:
                 break;
             }
+        }
+
+        // Player 1 = keyboard + first game controller, player 2 = second game controller. Pads are
+        // read live once per frame, so a button event can't be missed.
+        const std::array<std::uint8_t, 2> padStates = {
+            withoutOpposingDirections(keyboardPad.getHeld() | gamepads.getButtons(0)),
+            withoutOpposingDirections(gamepads.getButtons(1))};
+        for (int player = 0; player < 2; ++player) {
+            Controller& pad = bus.getController(player);
+            if (inputDebug && pad.getState() != padStates[static_cast<std::size_t>(player)]) {
+                std::cout << "Player " << player + 1 << ": " << describeButtons(padStates[static_cast<std::size_t>(player)]) << std::endl;
+            }
+            pad.setState(padStates[static_cast<std::size_t>(player)]);
         }
 
         // Pacing: sleep until the next frame deadline, emulate, then present exactly once, at a fixed

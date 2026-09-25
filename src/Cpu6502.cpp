@@ -479,10 +479,10 @@ void Cpu6502::branchIf(bool condition) {
 }
 
 void Cpu6502::writeModified(std::uint8_t original, std::uint8_t result) {
-    // Real hardware writes the unmodified value back before the result. RAM doesn't care, but
-    // mapper registers (e.g. MMC1) see both writes.
+    // Real hardware writes the unmodified value back, then the result on the very next cycle. RAM
+    // doesn't care, but mappers see both writes (and MMC1 ignores the second, consecutive one).
     write(fetchedAddress, original);
-    write(fetchedAddress, result);
+    bus.cpuWrite(fetchedAddress, result, true);
 }
 
 std::uint8_t Cpu6502::unimplemented() {

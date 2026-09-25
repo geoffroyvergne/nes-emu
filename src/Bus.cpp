@@ -20,7 +20,10 @@ void Bus::insertCartridge(std::shared_ptr<Cartridge> newCartridge) {
     cartridge = std::move(newCartridge);
 }
 
-void Bus::cpuWrite(std::uint16_t addr, std::uint8_t data) {
+void Bus::cpuWrite(std::uint16_t addr, std::uint8_t data, bool consecutiveCycle) {
+    if (!consecutiveCycle) {
+        ++writeStamp;
+    }
     if (addr <= RAM_END) {
         cpuRam[addr & RAM_MIRROR_MASK] = data;
     } else if (addr <= PPU_REGISTERS_END) {
@@ -40,7 +43,7 @@ void Bus::cpuWrite(std::uint16_t addr, std::uint8_t data) {
             apu->cpuWrite(addr, data);
         }
     } else if (cartridge) {
-        cartridge->cpuWrite(addr, data);
+        cartridge->cpuWrite(addr, data, writeStamp);
     }
 }
 
