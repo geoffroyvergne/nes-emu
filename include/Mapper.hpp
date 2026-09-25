@@ -28,6 +28,11 @@ public:
     [[nodiscard]] virtual Mirroring getMirroring() const { return mirroring; }
     [[nodiscard]] virtual bool isPrgRamEnabled() const { return true; }
 
+    // Scanline-counting boards (MMC3): the PPU calls this once per rendered scanline, and the
+    // mapper may then hold the CPU's IRQ line until the game acknowledges it.
+    virtual void clockScanline() {}
+    [[nodiscard]] virtual bool isIrqPending() const { return false; }
+
     // Identifies the CPU instruction performing the next cpuMapWrite. Two writes with the same
     // stamp came from one read-modify-write instruction on consecutive cycles (see Mapper_001).
     void setCpuWriteStamp(std::uint64_t stamp) { cpuWriteStamp = stamp; }

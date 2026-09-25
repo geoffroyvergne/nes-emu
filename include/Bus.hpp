@@ -44,6 +44,10 @@ public:
     // the CPU (Cpu6502::stallForOamDma). Reading it clears the request.
     [[nodiscard]] bool pollOamDma();
 
+    // The CPU's /IRQ input: level-triggered, asserted while any source wants service (APU frame
+    // counter, mapper scanline counter). Each source is acknowledged through its own registers.
+    [[nodiscard]] bool isIrqAsserted() const;
+
     // Host input: port 0 = player 1, port 1 = player 2.
     [[nodiscard]] Controller& getController(int port) { return controllers[static_cast<std::size_t>(port & 1)]; }
 

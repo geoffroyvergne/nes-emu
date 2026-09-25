@@ -30,6 +30,7 @@ add_executable(NesEmulator
     src/Mapper.cpp
     src/Mapper_000.cpp
     src/Mapper_001.cpp
+    src/Mapper_004.cpp
     src/NoiseChannel.cpp
     src/Ppu2C02.cpp
     src/PulseChannel.cpp

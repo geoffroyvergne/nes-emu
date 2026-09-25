@@ -24,6 +24,7 @@ constexpr std::uint16_t NAMETABLE_END = 0x3EFF;
 constexpr std::uint16_t PALETTE_START = 0x3F00;
 
 constexpr std::uint16_t NAMETABLE_SIZE = Ppu2C02::NAMETABLE_BYTES;
+constexpr int MAPPER_SCANLINE_CLOCK_DOT = 260; // When MMC3 sees A12 rise on a typical rendered line
 constexpr std::uint8_t GRAYSCALE_MASK = 0x30; // PPUMASK grayscale keeps only the luma column of the system palette
 
 using Color = Ppu2C02::Color;
@@ -495,6 +496,12 @@ void Ppu2C02::clock() {
     }
 
     if ((visibleLine || preRenderLine) && isRenderingEnabled()) {
+        if (cycle == MAPPER_SCANLINE_CLOCK_DOT && cartridge) {
+            // MMC3 counts rises of PPU address line A12. With the usual setup (background tiles
+            // from $0000, sprites from $1000) that happens once per line when sprite patterns are
+            // fetched, around dot 260; the line renderer has no fetch pipeline, so it's signalled here.
+            cartridge->clockScanline();
+        }
         if (cycle == 256) {
             vramAddr = incrementFineY(vramAddr);
         } else if (cycle == 257) {

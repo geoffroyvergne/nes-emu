@@ -2,6 +2,7 @@
 
 #include "Mapper_000.hpp"
 #include "Mapper_001.hpp"
+#include "Mapper_004.hpp"
 
 #include <array>
 #include <fstream>
@@ -48,7 +49,7 @@ void readExact(std::ifstream& file, void* dest, std::size_t size, const char* wh
 } // namespace
 
 bool Cartridge::isMapperSupported(int mapperId) {
-    return mapperId == 0 || mapperId == 1;
+    return mapperId == 0 || mapperId == 1 || mapperId == 4;
 }
 
 std::string_view Cartridge::mapperName(int mapperId) {
@@ -135,9 +136,12 @@ Cartridge::Cartridge(const std::filesystem::path& romPath) {
     case 1:
         mapper = std::make_unique<Mapper_001>(prgBankCount, chrBankCount, headerMirroring);
         break;
+    case 4:
+        mapper = std::make_unique<Mapper_004>(prgBankCount, chrBankCount, headerMirroring);
+        break;
     default:
         throw std::runtime_error("Mapper " + std::to_string(mapperId) + " (" + std::string(mapperName(mapperId)) +
-                                 ") is not supported yet (supported: 0 NROM, 1 MMC1)");
+                                 ") is not supported yet (supported: 0 NROM, 1 MMC1, 4 MMC3)");
     }
 }
 

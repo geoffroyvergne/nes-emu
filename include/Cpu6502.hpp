@@ -123,6 +123,9 @@ private:
     void storeShifted(std::uint8_t original, std::uint8_t result);
     // Pushes PC and status, then jumps through the NMI vector (7 cycles).
     void serviceNmi();
+    // Same sequence as NMI through the IRQ/BRK vector; taken when the bus asserts /IRQ and I is clear.
+    void serviceIrq();
+    void serviceInterrupt(std::uint16_t vector);
     // Temporary handler for opcodes not implemented yet: reports each opcode once, then acts as NOP.
     std::uint8_t unimplemented();
 

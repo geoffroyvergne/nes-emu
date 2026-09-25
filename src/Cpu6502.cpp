@@ -394,6 +394,11 @@ void Cpu6502::clock() {
 
     if (cyclesRemaining == 0 && nmiPending) {
         serviceNmi();
+    } else if (cyclesRemaining == 0 && !getFlag(I) && bus.isIrqAsserted()) {
+        // /IRQ is level-triggered: it is taken again after RTI unless the source was acknowledged.
+        // (The real 6502 polls one cycle earlier, so CLI/SEI/PLP delay the effect by one
+        // instruction; not modelled.)
+        serviceIrq();
     } else if (cyclesRemaining == 0) {
         opcode = read(pc++);
         status |= U;
@@ -450,12 +455,20 @@ std::uint8_t Cpu6502::fetch() {
 
 void Cpu6502::serviceNmi() {
     nmiPending = false;
+    serviceInterrupt(NMI_VECTOR);
+}
+
+void Cpu6502::serviceIrq() {
+    serviceInterrupt(IRQ_BRK_VECTOR);
+}
+
+void Cpu6502::serviceInterrupt(std::uint16_t vector) {
     push(static_cast<std::uint8_t>(pc >> 8));
     push(static_cast<std::uint8_t>(pc & 0xFF));
     // Hardware interrupts push status with B clear and U set.
     push(static_cast<std::uint8_t>((status & ~B) | U));
     setFlag(I, true);
-    pc = read16(NMI_VECTOR);
+    pc = read16(vector);
     cyclesRemaining = INTERRUPT_CYCLES;
 }
 

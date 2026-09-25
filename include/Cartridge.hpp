@@ -45,6 +45,9 @@ public:
     [[nodiscard]] std::uint8_t getMapperId() const { return mapperId; }
     // Current nametable mirroring: from the header, or set at runtime by the mapper (MMC1).
     [[nodiscard]] Mirroring getMirroring() const { return mapper->getMirroring(); }
+    // Scanline clock from the PPU, and the mapper's IRQ output (MMC3).
+    void clockScanline() { mapper->clockScanline(); }
+    [[nodiscard]] bool isIrqPending() const { return mapper->isIrqPending(); }
     [[nodiscard]] bool hasTrainer() const { return trainerPresent; }
     [[nodiscard]] bool hasBatteryRam() const { return batteryRam; }
     // TV system declared in the header, if any: NES 2.0 byte 12, or iNES byte 9 bit 0 when the header

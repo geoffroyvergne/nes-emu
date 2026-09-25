@@ -61,6 +61,10 @@ void Bus::runOamDma(std::uint8_t page) {
     oamDmaTriggered = true;
 }
 
+bool Bus::isIrqAsserted() const {
+    return (apu != nullptr && apu->isFrameIrqPending()) || (cartridge && cartridge->isIrqPending());
+}
+
 bool Bus::pollOamDma() {
     return std::exchange(oamDmaTriggered, false);
 }

@@ -64,8 +64,9 @@ An accurate, modular Nintendo Entertainment System (NES) emulator written from s
     - [x] Timing: the wall clock is the master. `FrameLimiter` wakes at each frame deadline (60.0988 / 50.007 fps), the frame is emulated and presented once at a fixed offset after the deadline (`PresentScheduler`), giving ~0.3 ms frame-delivery jitter on any refresh rate. `SDL_RenderPresent` is never used for pacing (on macOS/Metal it returns at irregular times). Audio follows via `AudioRateControl` (APU output rate nudged by at most +-0.5% to hold the SDL queue near 50 ms). Emulated fps shown in the title bar
     - [x] NTSC/PAL regions: `Region.hpp` holds every region-dependent constant (CPU clock, PPU dots per CPU cycle 3 vs 3.2, 262 vs 312 scanlines, odd-frame skip, APU frame counter steps, noise periods); detected from NES 2.0 byte 12 / iNES byte 9 / file name, overridable with --pal/--ntsc
     - [ ] DMC ($4010-$4013: delta-modulated samples read from PRG via the bus, CPU stall cycles)
-    - [ ] CPU IRQ line: frame counter IRQ (and DMC IRQ, mapper IRQs)
+    - [x] CPU IRQ line: frame counter IRQ and mapper IRQs (DMC IRQ with the DMC)
 - [ ] Step 6: Mappers (Current)
   - [x] `Mapper` base class (cpuMapRead/Write, ppuMapRead/Write, runtime mirroring, PRG-RAM enable); `Mapper_000` (NROM); `Mapper_001` (MMC1: 5-bit serial shift register with bit-7 reset, consecutive-cycle write ignore for RMW instructions, PRG modes 0-3, 4KB/8KB CHR, 4 mirroring modes incl. single-screen, PRG-RAM enable, SUROM 512KB); unsupported mappers fail at load with a clear error
   - [ ] Battery-backed PRG-RAM saved to a `.sav` file next to the ROM (Zelda, Final Fantasy, ...)
-  - [ ] Mapper 2 (UxROM), 3 (CNROM), 7 (AxROM), 4 (MMC3 + scanline IRQ, needs the CPU IRQ line)
+  - [x] `Mapper_004` (MMC3: R0-R7 bank registers, 8KB PRG in 2 layouts, 1KB/2KB CHR with A12 inversion, mirroring, scanline IRQ counter with latch/reload/ack, clocked by the PPU at dot 260 of rendered lines); CPU IRQ line (`Bus::isIrqAsserted()` = APU frame IRQ | mapper IRQ, taken at instruction boundaries when I is clear)
+  - [ ] Mapper 2 (UxROM), 3 (CNROM), 7 (AxROM)
